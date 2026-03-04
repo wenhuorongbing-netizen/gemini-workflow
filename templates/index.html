@@ -1,0 +1,642 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gemini Automation Workflow Builder (FastAPI + Playwright)</title>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f4f6f8; margin: 0; padding: 20px; display: flex; flex-direction: column; align-items: center; }
+        h1 { color: #333; margin-bottom: 20px; text-align: center; }
+        .container { display: flex; width: 95%; max-width: 1300px; background-color: white; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); overflow: hidden; }
+
+        .sidebar { width: 250px; background-color: #2c3e50; color: white; padding: 20px; overflow-y: auto; }
+        .sidebar h3 { margin-top: 0; border-bottom: 1px solid #34495e; padding-bottom: 10px; }
+        .prompt-item { background-color: #34495e; padding: 10px; margin-bottom: 10px; border-radius: 4px; display: flex; justify-content: space-between; align-items: center; cursor: pointer; transition: background 0.2s; }
+        .prompt-item:hover { background-color: #1abc9c; }
+        .prompt-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 150px; }
+        .prompt-actions span { font-size: 14px; margin-left: 5px; cursor: pointer; }
+
+        .main-content { flex: 1; padding: 30px; overflow-y: auto; }
+
+        .step-container { border: 1px solid #ddd; border-radius: 6px; padding: 20px; margin-bottom: 20px; background-color: #fcfcfc; position: relative; transition: all 0.3s; }
+        .step-container.is-running { border: 2px solid #4285F4; box-shadow: 0 0 10px rgba(66, 133, 244, 0.5); }
+        .step-container.is-completed::after { content: '✅'; position: absolute; top: 10px; right: 10px; font-size: 1.5em; }
+        .step-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; }
+        .step-title { font-weight: bold; font-size: 1.1em; color: #2980b9; display: flex; align-items: center; gap: 10px; }
+        .step-controls button { background: none; border: none; cursor: pointer; font-size: 18px; color: #7f8c8d; margin-left: 5px; }
+        .step-controls button:hover { color: #34495e; }
+
+        .toolbar { margin-bottom: 10px; }
+        .toolbar button { background-color: #ecf0f1; border: 1px solid #bdc3c7; padding: 5px 10px; border-radius: 4px; font-size: 0.85em; cursor: pointer; margin-right: 5px; color: #34495e; }
+        .toolbar button:hover { background-color: #bdc3c7; }
+
+        .top-toolbar { margin-bottom: 20px; display: flex; gap: 10px; align-items: center; }
+        .top-toolbar button { background-color: #34495e; color: white; border: none; padding: 8px 15px; border-radius: 4px; cursor: pointer; font-size: 0.9em; }
+        .top-toolbar button:hover { background-color: #2c3e50; }
+        .top-toolbar input[type="file"] { display: none; }
+
+        .upload-badge { display: inline-flex; align-items: center; background-color: #e8f4f8; padding: 5px 10px; border-radius: 12px; font-size: 0.85em; color: #31708f; border: 1px solid #bce8f1; margin-left: 10px; }
+        .upload-badge span { margin-right: 5px; max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .upload-badge button { background: none; border: none; color: #c0392b; cursor: pointer; padding: 0 5px; font-weight: bold; }
+
+        textarea { width: 100%; min-height: 120px; border: 1px solid #ccc; border-radius: 4px; padding: 10px; font-family: inherit; resize: vertical; box-sizing: border-box; }
+        .options { margin-top: 10px; display: flex; align-items: center; font-size: 0.9em; color: #555; }
+        .options input { margin-right: 8px; }
+        .step-type-toggle { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+        .step-type-toggle label { font-size: 0.9em; color: #34495e; font-weight: bold; }
+        .step-type-toggle select { padding: 5px; border-radius: 4px; border: 1px solid #ccc; }
+
+        .global-actions { display: flex; justify-content: space-between; align-items: center; margin-top: 20px; padding-top: 20px; border-top: 1px solid #eee; }
+        .btn { padding: 10px 20px; border: none; border-radius: 4px; cursor: pointer; font-size: 1em; font-weight: bold; transition: background 0.3s; }
+        .btn-add { background-color: #3498db; color: white; }
+        .btn-add:hover { background-color: #2980b9; }
+        .btn-run { background-color: #2ecc71; color: white; }
+        .btn-run:hover { background-color: #27ae60; }
+        .btn-save { background-color: #f39c12; color: white; }
+        .btn-save:hover { background-color: #e67e22; }
+
+        .status-bar { margin-top: 20px; padding: 15px; border-radius: 4px; background-color: #e8f4f8; border: 1px solid #bce8f1; display: none; color: #31708f; font-weight: bold; }
+
+        .results { margin-top: 30px; padding: 20px; border: 1px solid #27ae60; border-radius: 6px; background-color: #eafaf1; display: none; }
+        .result-item { margin-bottom: 20px; padding-bottom: 15px; border-bottom: 1px solid #ccc; }
+        .result-title { font-weight: bold; color: #27ae60; margin-bottom: 5px; }
+        .result-text { background: white; padding: 10px; border-radius: 4px; white-space: pre-wrap; font-family: monospace; font-size: 0.9em; border: 1px solid #ccc; max-height: 300px; overflow-y: auto; }
+
+        #execution-progress-container { width: 100%; background-color: #ddd; height: 10px; position: fixed; top: 0; left: 0; z-index: 1000; display: none; }
+        #execution-progress { width: 0%; height: 100%; background-color: #2ecc71; transition: width 0.3s; }
+
+        .modal { display: none; position: fixed; z-index: 1001; left: 0; top: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.5); }
+        .modal-content { background-color: white; margin: 15% auto; padding: 20px; border-radius: 8px; width: 300px; text-align: center; }
+        .modal input { width: 90%; padding: 8px; margin-bottom: 15px; }
+    </style>
+</head>
+<body>
+    <div id="execution-progress-container">
+        <div id="execution-progress"></div>
+    </div>
+
+    <h1>🤖 Gemini Workflow Builder <br><small style="font-size: 0.5em; color: #7f8c8d;">Powered by Playwright & FastAPI</small></h1>
+
+    <div class="container">
+        <div class="sidebar">
+            <h3>Saved Prompts</h3>
+            <div id="prompt-list"></div>
+            <button class="btn btn-save" style="width: 100%; margin-top: 15px;" onclick="saveCurrentToLibrary()">Save Current Step</button>
+
+            <h3 style="margin-top: 30px;">Workflow Templates</h3>
+            <div id="template-list">
+                <div class="prompt-item" onclick="loadTemplate('translate')">
+                    <div class="prompt-title">批量翻译 (Batch Translate)</div>
+                </div>
+                <div class="prompt-item" onclick="loadTemplate('viral_title')">
+                    <div class="prompt-title">爆款标题生成 (Viral Titles)</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="main-content">
+            <div class="top-toolbar">
+                <button onclick="document.getElementById('file-upload').click()">Import CSV/Text</button>
+                <input type="file" id="file-upload" accept=".csv, .txt" onchange="handleFileUpload(event)">
+
+                <button onclick="document.getElementById('attachment-upload').click()" style="background-color: #8e44ad;">📎 Attach File (PDF/Image)</button>
+                <input type="file" id="attachment-upload" accept=".pdf, .png, .jpg, .jpeg" onchange="handleAttachmentUpload(event)">
+
+                <div id="attachment-badge" class="upload-badge" style="display: none;">
+                    <span id="attachment-name"></span>
+                    <button onclick="removeAttachment()">×</button>
+                </div>
+            </div>
+            <div id="workflow-steps"></div>
+
+            <div class="global-actions">
+                <button class="btn btn-add" onclick="addStep()">+ Add Step</button>
+                <button class="btn btn-run" id="run-btn" onclick="executeWorkflow()">▶ Run Workflow</button>
+            </div>
+
+            <!-- Server-Sent Events Status Bar -->
+            <div id="status-bar" class="status-bar">Waiting to start...</div>
+
+            <div id="results-container" class="results">
+                <h3>Execution Results:</h3>
+                <div id="results-list"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Edit Prompt Modal -->
+    <div id="edit-modal" class="modal">
+        <div class="modal-content">
+            <h3>Edit Prompt Name</h3>
+            <input type="text" id="edit-prompt-name" placeholder="Enter new name">
+            <input type="hidden" id="edit-prompt-id">
+            <button class="btn btn-run" onclick="confirmEditPrompt()">Save</button>
+            <button class="btn" onclick="closeModal()">Cancel</button>
+        </div>
+    </div>
+
+    <script>
+        let stepCount = 0;
+        let promptLibrary = JSON.parse(localStorage.getItem('geminiPrompts')) || {};
+        let currentAttachment = null;
+
+        document.addEventListener('DOMContentLoaded', () => {
+            loadLibrary();
+            loadDraft();
+        });
+
+        // --- UI Interactions ---
+        function addStep(promptText = '', isNewChat = false, type = 'prompt') {
+            stepCount++;
+            const stepId = stepCount;
+            const container = document.getElementById('workflow-steps');
+
+            const stepDiv = document.createElement('div');
+            stepDiv.className = 'step-container';
+            stepDiv.id = `step-${stepId}`;
+
+            let toolbarHtml = '';
+
+            // Add CURRENT_ITEM to toolbar if step 1 is a Batch List and we are on a subsequent step
+            if (stepId > 1) {
+                const firstStepSelect = document.getElementById('type-1');
+                if (firstStepSelect && firstStepSelect.value === 'batch') {
+                    toolbarHtml += '<button type="button" onclick="insertCurrentItem(' + stepId + ')">+ {% raw %}{{CURRENT_ITEM}}{% endraw %}</button>';
+                }
+            }
+
+            for (let i = 1; i < stepId; i++) {
+                toolbarHtml += '<button type="button" onclick="insertVariable(' + stepId + ', ' + i + ')">+ {% raw %}{{OUTPUT_{% endraw %}' + i + '{% raw %}}}{% endraw %}</button>';
+            }
+
+            stepDiv.innerHTML = `
+                <div class="step-header">
+                    <span class="step-title">Step ${stepId}</span>
+                    <div class="step-controls">
+                        <button onclick="moveStepUp(${stepId})" title="Move Up">↑</button>
+                        <button onclick="moveStepDown(${stepId})" title="Move Down">↓</button>
+                        <button onclick="deleteStep(${stepId})" title="Delete" style="color: #e74c3c;">×</button>
+                    </div>
+                </div>
+                <div class="step-type-toggle">
+                    <label for="type-${stepId}">Type:</label>
+                    <select id="type-${stepId}" onchange="handleTypeChange(${stepId})">
+                        <option value="prompt" ${type === 'prompt' ? 'selected' : ''}>Prompt</option>
+                        <option value="batch" ${type === 'batch' ? 'selected' : ''}>Batch List</option>
+                    </select>
+                </div>
+                <div class="toolbar" id="toolbar-${stepId}">
+                    ${toolbarHtml ? '<span>Insert Context: </span>' + toolbarHtml : '<span style="color:#7f8c8d; font-size:0.85em;">No previous context available.</span>'}
+                </div>
+                <textarea id="prompt-${stepId}" placeholder="${type === 'batch' ? 'Enter one item per line...' : `Enter prompt for Step ${stepId}...`}" oninput="saveDraft()">${promptText}</textarea>
+                <div class="options">
+                    <input type="checkbox" id="newchat-${stepId}" onchange="saveDraft()" ${isNewChat ? 'checked' : ''}>
+                    <label for="newchat-${stepId}">Start New Chat for this step</label>
+                </div>
+            `;
+
+            container.appendChild(stepDiv);
+            updateToolbars();
+            saveDraft();
+        }
+
+        function handleTypeChange(stepId) {
+            const select = document.getElementById(`type-${stepId}`);
+            const textarea = document.getElementById(`prompt-${stepId}`);
+            if (select.value === 'batch') {
+                textarea.placeholder = "Enter one item per line...";
+            } else {
+                textarea.placeholder = `Enter prompt for Step ${stepId}...`;
+            }
+
+            // Allow time for DOM updates before recalculating toolbars if needed,
+            // especially important when Type 1 changes to Batch List so subsequent steps get the button.
+            setTimeout(() => {
+                updateToolbars();
+                saveDraft();
+            }, 0);
+        }
+
+        function insertCurrentItem(stepId) {
+            const textarea = document.getElementById(`prompt-${stepId}`);
+            const textToInsert = '{% raw %}{{CURRENT_ITEM}}{% endraw %}';
+            const startPos = textarea.selectionStart;
+            const endPos = textarea.selectionEnd;
+
+            textarea.value = textarea.value.substring(0, startPos) + textToInsert + textarea.value.substring(endPos, textarea.value.length);
+            textarea.selectionStart = startPos + textToInsert.length;
+            textarea.selectionEnd = startPos + textToInsert.length;
+            textarea.focus();
+            saveDraft();
+        }
+
+        function deleteStep(id) {
+            const step = document.getElementById(`step-${id}`);
+            if (step) {
+                step.remove();
+                renumberSteps();
+                saveDraft();
+            }
+        }
+
+        function moveStepUp(id) {
+            const step = document.getElementById(`step-${id}`);
+            if (step && step.previousElementSibling) {
+                step.parentNode.insertBefore(step, step.previousElementSibling);
+                renumberSteps();
+                saveDraft();
+            }
+        }
+
+        function moveStepDown(id) {
+            const step = document.getElementById(`step-${id}`);
+            if (step && step.nextElementSibling) {
+                step.parentNode.insertBefore(step.nextElementSibling, step);
+                renumberSteps();
+                saveDraft();
+            }
+        }
+
+        function renumberSteps() {
+            const steps = document.querySelectorAll('.step-container');
+            stepCount = 0;
+            steps.forEach((step, index) => {
+                stepCount++;
+                const newId = stepCount;
+
+                step.id = `step-${newId}`;
+                step.querySelector('.step-title').innerText = `Step ${newId}`;
+
+                const controls = step.querySelector('.step-controls');
+                controls.innerHTML = `
+                    <button onclick="moveStepUp(${newId})" title="Move Up">↑</button>
+                    <button onclick="moveStepDown(${newId})" title="Move Down">↓</button>
+                    <button onclick="deleteStep(${newId})" title="Delete" style="color: #e74c3c;">×</button>
+                `;
+
+                const textarea = step.querySelector('textarea');
+                textarea.id = `prompt-${newId}`;
+                textarea.placeholder = `Enter prompt for Step ${newId}...`;
+
+                const typeLabel = step.querySelector('.step-type-toggle label');
+                if (typeLabel) typeLabel.setAttribute('for', `type-${newId}`);
+
+                const select = step.querySelector('select');
+                if (select) {
+                    select.id = `type-${newId}`;
+                    select.setAttribute('onchange', `handleTypeChange(${newId})`);
+                }
+
+                const checkbox = step.querySelector('input[type="checkbox"]');
+                checkbox.id = `newchat-${newId}`;
+
+                const label = step.querySelector('.options label');
+                if (label) label.setAttribute('for', `newchat-${newId}`);
+
+                const toolbar = step.querySelector('.toolbar');
+                toolbar.id = `toolbar-${newId}`;
+            });
+            updateToolbars();
+        }
+
+        function updateToolbars() {
+            // Re-fetch all elements to ensure we are referencing live DOM nodes
+            const firstStepSelect = document.getElementById('type-1');
+            // Check value directly or use hardcoded string check if the DOM isn't reflecting the attr immediately
+            const isBatch = firstStepSelect && (firstStepSelect.value === 'batch' || firstStepSelect.querySelector('option[value="batch"]')?.selected || firstStepSelect.getAttribute('value') === 'batch');
+
+            for (let i = 1; i <= stepCount; i++) {
+                const toolbar = document.getElementById(`toolbar-${i}`);
+                if (toolbar) {
+                    let html = '';
+                    if (i > 1 && isBatch) {
+                        html += '<button type="button" class="btn-current-item" onclick="insertCurrentItem(' + i + ')">+ {% raw %}{{CURRENT_ITEM}}{% endraw %}</button>';
+                    }
+                    for (let j = 1; j < i; j++) {
+                        html += '<button type="button" class="btn-variable" onclick="insertVariable(' + i + ', ' + j + ')">+ {% raw %}{{OUTPUT_{% endraw %}' + j + '{% raw %}}}{% endraw %}</button>';
+                    }
+                    toolbar.innerHTML = html ? '<span>Insert Context: </span>' + html : '<span style="color:#7f8c8d; font-size:0.85em;">No previous context available.</span>';
+                }
+            }
+        }
+
+        function insertVariable(stepId, varId) {
+            const textarea = document.getElementById(`prompt-${stepId}`);
+            const textToInsert = '{% raw %}{{OUTPUT_{% endraw %}' + varId + '{% raw %}}}{% endraw %}';
+
+            const startPos = textarea.selectionStart;
+            const endPos = textarea.selectionEnd;
+
+            textarea.value = textarea.value.substring(0, startPos)
+                + textToInsert
+                + textarea.value.substring(endPos, textarea.value.length);
+
+            textarea.selectionStart = startPos + textToInsert.length;
+            textarea.selectionEnd = startPos + textToInsert.length;
+            textarea.focus();
+            saveDraft();
+        }
+
+        // --- Data Persistence ---
+        function saveDraft() {
+            const steps = [];
+            for (let i = 1; i <= stepCount; i++) {
+                const prompt = document.getElementById(`prompt-${i}`).value;
+                const newChat = document.getElementById(`newchat-${i}`).checked;
+                const type = document.getElementById(`type-${i}`) ? document.getElementById(`type-${i}`).value : 'prompt';
+                steps.push({ prompt, new_chat: newChat, type });
+            }
+            localStorage.setItem('geminiDraft', JSON.stringify(steps));
+        }
+
+        function loadDraft() {
+            const draft = JSON.parse(localStorage.getItem('geminiDraft'));
+            if (draft && draft.length > 0) {
+                draft.forEach(step => addStep(step.prompt, step.new_chat, step.type || 'prompt'));
+            } else {
+                addStep();
+            }
+        }
+
+        function handleFileUpload(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                const content = e.target.result;
+                if (stepCount === 0) {
+                    addStep(content, false, 'batch');
+                } else {
+                    const firstStepPrompt = document.getElementById('prompt-1');
+                    const firstStepType = document.getElementById('type-1');
+                    firstStepPrompt.value = content;
+                    firstStepType.value = 'batch';
+                    handleTypeChange(1);
+                }
+                saveDraft();
+            };
+            reader.readAsText(file);
+        }
+
+        function handleAttachmentUpload(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            currentAttachment = file;
+            document.getElementById('attachment-name').innerText = file.name;
+            document.getElementById('attachment-badge').style.display = 'inline-flex';
+        }
+
+        function removeAttachment() {
+            currentAttachment = null;
+            document.getElementById('attachment-upload').value = '';
+            document.getElementById('attachment-badge').style.display = 'none';
+        }
+
+        function saveCurrentToLibrary() {
+            if (stepCount === 0) return;
+            const lastPrompt = document.getElementById(`prompt-${stepCount}`).value;
+            if (!lastPrompt.trim()) return alert("Current step is empty!");
+
+            const name = prompt("Enter a name for this prompt:");
+            if (name) {
+                const id = Date.now().toString();
+                promptLibrary[id] = { name, text: lastPrompt };
+                localStorage.setItem('geminiPrompts', JSON.stringify(promptLibrary));
+                loadLibrary();
+            }
+        }
+
+        function loadLibrary() {
+            const list = document.getElementById('prompt-list');
+            list.innerHTML = '';
+            for (const [id, item] of Object.entries(promptLibrary)) {
+                const div = document.createElement('div');
+                div.className = 'prompt-item';
+                div.innerHTML = `
+                    <div class="prompt-title" title="${item.text}" onclick="injectPrompt('${id}')">${item.name}</div>
+                    <div class="prompt-actions">
+                        <span onclick="openEditModal('${id}')" title="Edit Name">✎</span>
+                        <span onclick="deletePrompt('${id}')" title="Delete" style="color:#e74c3c;">×</span>
+                    </div>
+                `;
+                list.appendChild(div);
+            }
+        }
+
+        function injectPrompt(id) {
+            if (stepCount === 0) addStep();
+            const textarea = document.getElementById(`prompt-${stepCount}`);
+            textarea.value += (textarea.value ? '\n\n' : '') + promptLibrary[id].text;
+            saveDraft();
+        }
+
+        function deletePrompt(id) {
+            if (confirm("Delete this saved prompt?")) {
+                delete promptLibrary[id];
+                localStorage.setItem('geminiPrompts', JSON.stringify(promptLibrary));
+                loadLibrary();
+            }
+        }
+
+        function openEditModal(id) {
+            document.getElementById('edit-prompt-id').value = id;
+            document.getElementById('edit-prompt-name').value = promptLibrary[id].name;
+            document.getElementById('edit-modal').style.display = 'block';
+        }
+
+        function loadTemplate(type) {
+            if (stepCount > 0 && !confirm("Loading a template will overwrite your current workflow. Continue?")) return;
+
+            // clear current
+            document.getElementById('workflow-steps').innerHTML = '';
+            stepCount = 0;
+
+            if (type === 'translate') {
+                addStep("Hello\nWorld\nHow are you?", false, 'batch');
+                addStep("Translate the following into Chinese:\n{% raw %}{{CURRENT_ITEM}}{% endraw %}", true, 'prompt');
+            } else if (type === 'viral_title') {
+                addStep("Healthy eating habits\nWorking from home tips\nBest budget smartphones", false, 'batch');
+                addStep("You are a professional copywriter. Generate 3 viral-style, click-worthy titles for an article about:\n{% raw %}{{CURRENT_ITEM}}{% endraw %}", true, 'prompt');
+            }
+            // Need to update toolbars after fully generating the template to establish {{CURRENT_ITEM}} dependencies
+            setTimeout(() => {
+                // Manually trigger the select change event handlers that might be bound
+                const firstStepSelect = document.getElementById('type-1');
+                if (firstStepSelect) handleTypeChange(1);
+
+                updateToolbars();
+                saveDraft();
+            }, 100);
+        }
+
+        function closeModal() {
+            document.getElementById('edit-modal').style.display = 'none';
+        }
+
+        function confirmEditPrompt() {
+            const id = document.getElementById('edit-prompt-id').value;
+            const newName = document.getElementById('edit-prompt-name').value;
+            if (newName.trim()) {
+                promptLibrary[id].name = newName;
+                localStorage.setItem('geminiPrompts', JSON.stringify(promptLibrary));
+                loadLibrary();
+                closeModal();
+            }
+        }
+
+        // --- Execution (SSE stream parsing) ---
+        async function executeWorkflow() {
+            const steps = [];
+            for (let i = 1; i <= stepCount; i++) {
+                const prompt = document.getElementById(`prompt-${i}`).value.trim();
+                const newChat = document.getElementById(`newchat-${i}`).checked;
+                const type = document.getElementById(`type-${i}`).value;
+
+                if (!prompt) {
+                    alert(`Step ${i} cannot be empty.`);
+                    return;
+                }
+                steps.push({ prompt, new_chat: newChat, type });
+            }
+
+            if (steps.length === 0) return alert("Please add at least one step.");
+
+            const runBtn = document.getElementById('run-btn');
+            const statusBar = document.getElementById('status-bar');
+            const resultsList = document.getElementById('results-list');
+            const resultsContainer = document.getElementById('results-container');
+
+            runBtn.disabled = true;
+            runBtn.innerText = "⏳ Running...";
+            statusBar.style.display = 'block';
+            statusBar.innerText = "Connecting to backend...";
+            resultsContainer.style.display = 'block';
+            resultsList.innerHTML = '';
+
+            const progressContainer = document.getElementById('execution-progress-container');
+            const progressBar = document.getElementById('execution-progress');
+            progressContainer.style.display = 'block';
+            progressBar.style.width = '0%';
+
+            // reset step styles
+            document.querySelectorAll('.step-container').forEach(el => {
+                el.classList.remove('is-running');
+                el.classList.remove('is-completed');
+            });
+
+            try {
+                let response;
+
+                if (currentAttachment) {
+                    const formData = new FormData();
+                    formData.append("steps", JSON.stringify(steps));
+                    formData.append("file", currentAttachment);
+
+                    response = await fetch('/execute', {
+                        method: 'POST',
+                        body: formData
+                    });
+                } else {
+                    response = await fetch('/execute', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ steps })
+                    });
+                }
+
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder('utf-8');
+                let buffer = '';
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+
+                    buffer += decoder.decode(value, { stream: true });
+                    const events = buffer.split('\n\n');
+
+                    // Keep the last element in the buffer, as it might be incomplete
+                    buffer = events.pop();
+
+                    for (let evt of events) {
+                        if (evt.startsWith('data: ')) {
+                            const dataStr = evt.substring(6);
+                            if (!dataStr) continue;
+
+                            try {
+                                const data = JSON.parse(dataStr);
+
+                                if (data.error) {
+                                    statusBar.innerText = `Error: ${data.error}`;
+                                    statusBar.style.color = 'red';
+                                    break;
+                                }
+
+                                if (data.status === 'Workflow Finished') {
+                                    statusBar.innerText = "✅ Workflow Completed Successfully!";
+                                    statusBar.style.color = '#27ae60';
+                                    progressBar.style.width = '100%';
+                                    setTimeout(() => progressContainer.style.display = 'none', 2000);
+                                    break;
+                                }
+
+                                if (data.progress !== undefined) {
+                                    progressBar.style.width = `${data.progress}%`;
+                                }
+
+                                if (data.step) {
+                                    statusBar.innerText = `Step ${data.step} - ${data.status}: ${data.message || ''}`;
+
+                                    const currentStepDiv = document.getElementById(`step-${data.step}`);
+                                    if (currentStepDiv) {
+                                        if (data.status === 'Starting') {
+                                            currentStepDiv.classList.add('is-running');
+                                            currentStepDiv.classList.remove('is-completed');
+                                        } else if (data.status === 'Complete') {
+                                            currentStepDiv.classList.remove('is-running');
+                                            currentStepDiv.classList.add('is-completed');
+                                        } else if (data.status === 'Error') {
+                                            currentStepDiv.classList.remove('is-running');
+                                        }
+                                    }
+                                }
+
+                                // Check if we received a completed result chunk for a step
+                                if (data.result !== undefined && data.step) {
+                                     // Append the step result to the DOM dynamically as it arrives, avoiding innerHTML for the result
+                                     const div = document.createElement('div');
+                                     div.className = 'result-item';
+
+                                     const titleDiv = document.createElement('div');
+                                     titleDiv.className = 'result-title';
+                                     titleDiv.textContent = `Output of Step ${data.step}:`;
+
+                                     const textDiv = document.createElement('div');
+                                     textDiv.className = 'result-text';
+                                     textDiv.textContent = data.result; // Use textContent to prevent XSS
+
+                                     div.appendChild(titleDiv);
+                                     div.appendChild(textDiv);
+                                     resultsList.appendChild(div);
+                                }
+
+                            } catch (e) {
+                                console.error("Error parsing chunk:", e);
+                            }
+                        }
+                    }
+                }
+
+            } catch (error) {
+                statusBar.innerText = `Network Error: ${error.message}`;
+                statusBar.style.color = 'red';
+            } finally {
+                runBtn.disabled = false;
+                runBtn.innerText = "▶ Run Workflow";
+            }
+        }
+    </script>
+</body>
+</html>
