@@ -48,11 +48,14 @@ async def execute_workflow(request: Request):
 
     file_path = None
     steps = []
+    continue_on_error = False
 
     try:
         if "multipart/form-data" in content_type:
             form = await request.form()
             steps_str = form.get("steps")
+            continue_on_error = form.get("continue_on_error") == "true"
+
             if not steps_str:
                 return StreamingResponse(error_stream("No steps provided in workflow."), media_type="text/event-stream")
             steps = json.loads(steps_str)
@@ -68,6 +71,7 @@ async def execute_workflow(request: Request):
         else:
             data = await request.json()
             steps = data.get('steps', [])
+            continue_on_error = data.get('continue_on_error', False)
 
     except Exception as e:
         return StreamingResponse(error_stream(f"Invalid payload: {str(e)}"), media_type="text/event-stream")
@@ -176,8 +180,14 @@ async def execute_workflow(request: Request):
                         else:
                             results[str(step_id)] = f"[FAILED] {error_msg}"
                             yield f"data: {json.dumps({'step': step_id, 'status': 'Error', 'result': results[str(step_id)]})}\n\n"
-                        # If a critical error occurs, break the workflow to avoid cascaded failures
-                        break
+
+                        if continue_on_error and total_iterations > 1:
+                            logging.info(f"Continuing to next iteration despite error in step {step_id}.")
+                            break # Break inner loop (steps), continue outer loop (batch items)
+                        else:
+                            # If not resilient batch mode, break the entire execution
+                            yield f"data: {json.dumps({'status': 'Workflow Finished', 'results': results, 'progress': 100})}\n\n"
+                            return
 
             yield f"data: {json.dumps({'status': 'Workflow Finished', 'results': results, 'progress': 100})}\n\n"
         finally:

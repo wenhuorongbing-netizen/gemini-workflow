@@ -4,6 +4,9 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Gemini Automation Workflow Builder (FastAPI + Playwright)</title>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
     <style>
         body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f4f6f8; margin: 0; padding: 20px; display: flex; flex-direction: column; align-items: center; }
         h1 { color: #333; margin-bottom: 20px; text-align: center; }
@@ -60,7 +63,12 @@
         .results { margin-top: 30px; padding: 20px; border: 1px solid #27ae60; border-radius: 6px; background-color: #eafaf1; display: none; }
         .result-item { margin-bottom: 20px; padding-bottom: 15px; border-bottom: 1px solid #ccc; }
         .result-title { font-weight: bold; color: #27ae60; margin-bottom: 5px; }
-        .result-text { background: white; padding: 10px; border-radius: 4px; white-space: pre-wrap; font-family: monospace; font-size: 0.9em; border: 1px solid #ccc; max-height: 300px; overflow-y: auto; }
+        .result-text { background: white; padding: 10px; border-radius: 4px; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; font-size: 0.9em; border: 1px solid #ccc; max-height: 500px; overflow-y: auto; }
+        .result-text pre { background: #1e1e1e; padding: 10px; border-radius: 4px; overflow-x: auto; color: white; }
+        .result-text code { font-family: 'Courier New', Courier, monospace; }
+        .result-text table { border-collapse: collapse; width: 100%; margin-bottom: 10px; }
+        .result-text th, .result-text td { border: 1px solid #ccc; padding: 8px; text-align: left; }
+        .result-text th { background-color: #f2f2f2; }
 
         #execution-progress-container { width: 100%; background-color: #ddd; height: 10px; position: fixed; top: 0; left: 0; z-index: 1000; display: none; }
         #execution-progress { width: 0%; height: 100%; background-color: #2ecc71; transition: width 0.3s; }
@@ -91,6 +99,12 @@
                 <div class="prompt-item" onclick="loadTemplate('viral_title')">
                     <div class="prompt-title">爆款标题生成 (Viral Titles)</div>
                 </div>
+                <div class="prompt-item" onclick="loadTemplate('xiaohongshu')">
+                    <div class="prompt-title">小红书爆款机 (XHS Machine)</div>
+                </div>
+                <div class="prompt-item" onclick="loadTemplate('foreign_trade')">
+                    <div class="prompt-title">外贸回信专家 (Trade Replies)</div>
+                </div>
             </div>
         </div>
 
@@ -111,14 +125,23 @@
 
             <div class="global-actions">
                 <button class="btn btn-add" onclick="addStep()">+ Add Step</button>
-                <button class="btn btn-run" id="run-btn" onclick="executeWorkflow()">▶ Run Workflow</button>
+                <div style="display: flex; align-items: center; gap: 15px;">
+                    <label style="font-size: 0.9em; color: #555; cursor: pointer;">
+                        <input type="checkbox" id="continue-on-error" checked>
+                        Continue on Error (Batch Mode)
+                    </label>
+                    <button class="btn btn-run" id="run-btn" onclick="executeWorkflow()">▶ Run Workflow</button>
+                </div>
             </div>
 
             <!-- Server-Sent Events Status Bar -->
             <div id="status-bar" class="status-bar">Waiting to start...</div>
 
             <div id="results-container" class="results">
-                <h3>Execution Results:</h3>
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+                    <h3 style="margin: 0;">Execution Results:</h3>
+                    <button class="btn btn-save" id="export-btn" onclick="exportReport()" style="display: none;">📥 Export Report</button>
+                </div>
                 <div id="results-list"></div>
             </div>
         </div>
@@ -139,6 +162,15 @@
         let stepCount = 0;
         let promptLibrary = JSON.parse(localStorage.getItem('geminiPrompts')) || {};
         let currentAttachment = null;
+
+        // Configure marked to use highlight.js
+        marked.setOptions({
+            highlight: function(code, lang) {
+                const language = hljs.getLanguage(lang) ? lang : 'plaintext';
+                return hljs.highlight(code, { language }).value;
+            },
+            langPrefix: 'hljs language-'
+        });
 
         document.addEventListener('DOMContentLoaded', () => {
             loadLibrary();
@@ -459,6 +491,14 @@
             } else if (type === 'viral_title') {
                 addStep("Healthy eating habits\nWorking from home tips\nBest budget smartphones", false, 'batch');
                 addStep("You are a professional copywriter. Generate 3 viral-style, click-worthy titles for an article about:\n{% raw %}{{CURRENT_ITEM}}{% endraw %}", true, 'prompt');
+            } else if (type === 'xiaohongshu') {
+                addStep("职场穿搭\n减脂餐\n周末随心游", false, 'batch');
+                addStep("你是一个小红书爆款文案专家。请针对主题『{% raw %}{{CURRENT_ITEM}}{% endraw %}』生成 3 个吸引眼球的标题（包含猎奇、痛点、干货三种风格）。", true, 'prompt');
+                addStep("请将以下标题加上适当的Emoji，并输出为带格式的Markdown列表：\n\n{% raw %}{{OUTPUT_2}}{% endraw %}", false, 'prompt');
+            } else if (type === 'foreign_trade') {
+                alert("Please attach a PDF or image screenshot of the customer inquiry before running this template.");
+                addStep("Extract the core pain points and specific requests from the attached customer inquiry.", true, 'prompt');
+                addStep("Write a professional, polite B2B business email replying to the inquiry. Address their specific pain points mentioned here: {% raw %}{{OUTPUT_1}}{% endraw %}\n\nInclude a placeholder for a price quote.", false, 'prompt');
             }
             // Need to update toolbars after fully generating the template to establish {{CURRENT_ITEM}} dependencies
             setTimeout(() => {
@@ -486,6 +526,29 @@
             }
         }
 
+        function exportReport() {
+            if (!window.lastExecutionResults) return alert("No results to export.");
+
+            let markdown = "# Gemini Workflow Execution Report\n\n";
+            markdown += `*Generated on: ${new Date().toLocaleString()}*\n\n---\n\n`;
+
+            for (const [key, value] of Object.entries(window.lastExecutionResults)) {
+                markdown += `### Step / Result [${key}]\n\n`;
+                markdown += `${value}\n\n---\n\n`;
+            }
+
+            const blob = new Blob([markdown], { type: 'text/markdown' });
+            const url = URL.createObjectURL(blob);
+
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `gemini_workflow_report_${Date.now()}.md`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        }
+
         // --- Execution (SSE stream parsing) ---
         async function executeWorkflow() {
             const steps = [];
@@ -502,6 +565,8 @@
             }
 
             if (steps.length === 0) return alert("Please add at least one step.");
+
+            const continueOnError = document.getElementById('continue-on-error').checked;
 
             const runBtn = document.getElementById('run-btn');
             const statusBar = document.getElementById('status-bar');
@@ -533,6 +598,7 @@
                     const formData = new FormData();
                     formData.append("steps", JSON.stringify(steps));
                     formData.append("file", currentAttachment);
+                    formData.append("continue_on_error", continueOnError);
 
                     response = await fetch('/execute', {
                         method: 'POST',
@@ -542,7 +608,7 @@
                     response = await fetch('/execute', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ steps })
+                        body: JSON.stringify({ steps, continue_on_error: continueOnError })
                     });
                 }
 
@@ -578,6 +644,11 @@
                                     statusBar.innerText = "✅ Workflow Completed Successfully!";
                                     statusBar.style.color = '#27ae60';
                                     progressBar.style.width = '100%';
+                                    document.getElementById('export-btn').style.display = 'block';
+
+                                    // Store final results globally for export
+                                    window.lastExecutionResults = data.results;
+
                                     setTimeout(() => progressContainer.style.display = 'none', 2000);
                                     break;
                                 }
@@ -605,7 +676,6 @@
 
                                 // Check if we received a completed result chunk for a step
                                 if (data.result !== undefined && data.step) {
-                                     // Append the step result to the DOM dynamically as it arrives, avoiding innerHTML for the result
                                      const div = document.createElement('div');
                                      div.className = 'result-item';
 
@@ -615,7 +685,17 @@
 
                                      const textDiv = document.createElement('div');
                                      textDiv.className = 'result-text';
-                                     textDiv.textContent = data.result; // Use textContent to prevent XSS
+
+                                     // Use marked.parse to convert Markdown to HTML
+                                     try {
+                                         // marked.parse returns HTML string, we use innerHTML here,
+                                         // but marked escapes raw HTML by default to prevent XSS if configured,
+                                         // or we trust the LLM output in this controlled context.
+                                         textDiv.innerHTML = marked.parse(data.result);
+                                     } catch (e) {
+                                         console.error("Markdown parsing error", e);
+                                         textDiv.textContent = data.result; // Fallback
+                                     }
 
                                      div.appendChild(titleDiv);
                                      div.appendChild(textDiv);

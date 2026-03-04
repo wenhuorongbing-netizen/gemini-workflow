@@ -6,12 +6,13 @@ from typing import Optional
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 class GeminiBot:
-    def __init__(self, profile_path="chrome_profile"):
+    def __init__(self, profile_path="chrome_profile", headless=False):
         """
         Initializes the Playwright bot using an asynchronous architecture.
         Utilizes persistent context to keep the user logged into their Google account.
         """
         self.profile_path = profile_path
+        self.headless = headless
         self.playwright = None
         self.context: Optional[BrowserContext] = None
         self.page: Optional[Page] = None
@@ -26,10 +27,9 @@ class GeminiBot:
             self.playwright = await async_playwright().start()
 
             # Using persistent context to maintain login sessions
-            # headless=False is recommended for first login, then it can be toggled
             self.context = await self.playwright.chromium.launch_persistent_context(
                 user_data_dir=self.profile_path,
-                headless=False, # Set to True after initial login for better performance
+                headless=self.headless,
                 args=[
                     "--disable-infobars",
                     "--disable-extensions",
