@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Gemini Automation Workflow Builder (FastAPI + Playwright)</title>
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.0.6/purify.min.js"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
     <style>
@@ -686,12 +687,9 @@
                                      const textDiv = document.createElement('div');
                                      textDiv.className = 'result-text';
 
-                                     // Use marked.parse to convert Markdown to HTML
+                                     // Use marked.parse to convert Markdown to HTML safely
                                      try {
-                                         // marked.parse returns HTML string, we use innerHTML here,
-                                         // but marked escapes raw HTML by default to prevent XSS if configured,
-                                         // or we trust the LLM output in this controlled context.
-                                         textDiv.innerHTML = marked.parse(data.result);
+                                         textDiv.innerHTML = DOMPurify.sanitize(marked.parse(data.result));
                                      } catch (e) {
                                          console.error("Markdown parsing error", e);
                                          textDiv.textContent = data.result; // Fallback

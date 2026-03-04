@@ -95,6 +95,10 @@ async def execute_workflow(request: Request):
 
             results = {}
 
+            # Reset context at the beginning of the workflow
+            yield f"data: {json.dumps({'step': 0, 'status': 'Starting', 'message': 'Resetting Gemini chat context...'})}\n\n"
+            await current_bot.start_new_chat()
+
             batch_items = []
             if steps and steps[0].get('type') == 'batch':
                 batch_text = steps[0].get('prompt', '')
@@ -108,22 +112,41 @@ async def execute_workflow(request: Request):
                 batch_items = [None] # Single run
 
             total_iterations = len(batch_items)
+            total_steps = len(steps_to_execute)
+            completed_tasks = 0
 
-            for iteration, current_item in enumerate(batch_items):
-                iteration_id = iteration + 1
+            # Map-Reduce Loop Inversion: Iterate over steps first
+            for index, step in enumerate(steps_to_execute):
+                step_id = index + 1 if not steps or steps[0].get('type') != 'batch' else index + 2
+                prompt_template = step.get('prompt', '')
+                new_chat = step.get('new_chat', False)
+                is_batch_step = "{{CURRENT_ITEM}}" in prompt_template
 
-                for index, step in enumerate(steps_to_execute):
-                    step_id = index + 1 if not steps or steps[0].get('type') != 'batch' else index + 2
-                    prompt_template = step.get('prompt', '')
-                    new_chat = step.get('new_chat', False)
+                # Determine how many times this step will run
+                step_iterations = batch_items if is_batch_step else [None]
+                total_step_iterations = len(step_iterations)
 
-                    logging.info(f"Executing Step {step_id} (Iteration {iteration_id}/{total_iterations})")
+                # Flag to break outer loop if non-resilient failure occurs
+                fatal_error = False
+
+                for iteration, current_item in enumerate(step_iterations):
+                    iteration_id = iteration + 1
+
+                    logging.info(f"Executing Step {step_id} (Iteration {iteration_id}/{total_step_iterations})")
                     progress_msg = f"Executing Step {step_id}"
-                    if total_iterations > 1:
-                        progress_msg += f" (Item {iteration_id}/{total_iterations})"
-                        progress_percent = int(((iteration * len(steps_to_execute) + index) / (total_iterations * len(steps_to_execute))) * 100)
-                    else:
-                        progress_percent = int(((index) / len(steps_to_execute)) * 100)
+                    if total_step_iterations > 1:
+                        progress_msg += f" (Item {iteration_id}/{total_step_iterations})"
+
+                    # Estimate total tasks by weighting steps.
+                    # This is an approximation for the progress bar.
+                    estimated_total_operations = 0
+                    for s in steps_to_execute:
+                         if "{{CURRENT_ITEM}}" in s.get('prompt', ''):
+                             estimated_total_operations += total_iterations
+                         else:
+                             estimated_total_operations += 1
+
+                    progress_percent = int((completed_tasks / max(1, estimated_total_operations)) * 100)
 
                     yield f"data: {json.dumps({'step': step_id, 'status': 'Starting', 'message': progress_msg, 'progress': progress_percent})}\n\n"
 
@@ -141,10 +164,25 @@ async def execute_workflow(request: Request):
                         for past_index in range(1, step_id):
                             tag = f"{{{{OUTPUT_{past_index}}}}}"
                             if tag in final_prompt:
-                                # Try to get the output from the current iteration first, fallback to standard
-                                result_key = f"{past_index}_{iteration_id}" if total_iterations > 1 else str(past_index)
-                                if result_key in results:
-                                    final_prompt = final_prompt.replace(tag, results[result_key])
+                                # Try to get the output from the current iteration first (if previous step was a batch step)
+                                iteration_key = f"{past_index}_{iteration_id}"
+                                standard_key = str(past_index)
+
+                                if iteration_key in results:
+                                    final_prompt = final_prompt.replace(tag, results[iteration_key])
+                                elif standard_key in results:
+                                    final_prompt = final_prompt.replace(tag, results[standard_key])
+                                else:
+                                    # This implies the previous step was a batch step, but we are in a non-batch step.
+                                    # We need to aggregate the results.
+                                    aggregated_results = []
+                                    for i in range(1, total_iterations + 1):
+                                        key = f"{past_index}_{i}"
+                                        if key in results:
+                                            aggregated_results.append(f"--- Item {i} ---\n{results[key]}")
+
+                                    if aggregated_results:
+                                        final_prompt = final_prompt.replace(tag, "\n\n".join(aggregated_results))
 
                         yield f"data: {json.dumps({'step': step_id, 'status': 'Sending', 'message': 'Sending prompt to Gemini...'})}\n\n"
 
@@ -163,34 +201,48 @@ async def execute_workflow(request: Request):
                         yield f"data: {json.dumps({'step': step_id, 'status': 'Extracting', 'message': 'Extracting response text...'})}\n\n"
                         response_text = await current_bot.get_last_response()
 
-                        if total_iterations > 1:
+                        if total_step_iterations > 1:
                             results[f"{step_id}_{iteration_id}"] = response_text
-                            yield f"data: {json.dumps({'step': step_id, 'status': 'Complete', 'result': f'[Item {iteration_id}]: {response_text}', 'progress': int(((iteration * len(steps_to_execute) + index + 1) / (total_iterations * len(steps_to_execute))) * 100)})}\n\n"
+                            yield f"data: {json.dumps({'step': step_id, 'status': 'Complete', 'result': f'[Item {iteration_id}]: {response_text}'})}\n\n"
                         else:
                             results[str(step_id)] = response_text
-                            yield f"data: {json.dumps({'step': step_id, 'status': 'Complete', 'result': response_text, 'progress': int(((index + 1) / len(steps_to_execute)) * 100)})}\n\n"
+                            yield f"data: {json.dumps({'step': step_id, 'status': 'Complete', 'result': response_text})}\n\n"
                         logging.info(f"Step {step_id} completed successfully.")
+                        completed_tasks += 1
 
                     except Exception as e:
                         error_msg = f"Error in Step {step_id}: {str(e)}"
                         logging.error(error_msg)
-                        if total_iterations > 1:
+                        if total_step_iterations > 1:
                             results[f"{step_id}_{iteration_id}"] = f"[FAILED] {error_msg}"
                             yield f"data: {json.dumps({'step': step_id, 'status': 'Error', 'result': results[f'{step_id}_{iteration_id}']})}\n\n"
                         else:
                             results[str(step_id)] = f"[FAILED] {error_msg}"
                             yield f"data: {json.dumps({'step': step_id, 'status': 'Error', 'result': results[str(step_id)]})}\n\n"
 
-                        if continue_on_error and total_iterations > 1:
+                        completed_tasks += 1
+
+                        if continue_on_error and is_batch_step:
                             logging.info(f"Continuing to next iteration despite error in step {step_id}.")
-                            break # Break inner loop (steps), continue outer loop (batch items)
+                            continue # Continue to next item in the batch
                         else:
-                            # If not resilient batch mode, break the entire execution
-                            yield f"data: {json.dumps({'status': 'Workflow Finished', 'results': results, 'progress': 100})}\n\n"
-                            return
+                            # If not resilient batch mode, or a single non-batch step fails, break the entire execution
+                            fatal_error = True
+                            break
+
+                if fatal_error:
+                    yield f"data: {json.dumps({'status': 'Workflow Finished', 'results': results, 'progress': 100})}\n\n"
+                    return
 
             yield f"data: {json.dumps({'status': 'Workflow Finished', 'results': results, 'progress': 100})}\n\n"
         finally:
+            # Clean up uploaded files to prevent disk leak
+            if file_path and os.path.exists(file_path):
+                try:
+                    os.remove(file_path)
+                    logging.info(f"Cleaned up uploaded file: {file_path}")
+                except Exception as e:
+                    logging.error(f"Failed to clean up file {file_path}: {e}")
             bot_lock.release()
 
     # We use StreamingResponse to send Server-Sent Events (SSE) back to the client
