@@ -112,6 +112,12 @@
                     <div class="prompt-title">外贸回信专家 (Trade Replies)</div>
                 </div>
             </div>
+
+            <div class="sidebar-section" style="margin-top: 30px; border-top: 1px solid #4a5a6a; padding-top: 20px;">
+                <button class="btn btn-run" onclick="exportWorkflow()" style="width: 100%; margin-bottom: 10px; background-color: #2c3e50; border: 1px solid #34495e;">📁 Export Workflow</button>
+                <button class="btn btn-run" onclick="document.getElementById('import-workflow').click()" style="width: 100%; background-color: #2c3e50; border: 1px solid #34495e;">📂 Import Workflow</button>
+                <input type="file" id="import-workflow" accept=".json" style="display: none;" onchange="importWorkflow(event)">
+            </div>
         </div>
 
         <div class="main-content">
@@ -262,7 +268,7 @@
                 <div class="toolbar" id="toolbar-${stepId}">
                     ${toolbarHtml ? '<span>Insert Context: </span>' + toolbarHtml : '<span style="color:#7f8c8d; font-size:0.85em;">No previous context available.</span>'}
                 </div>
-                <textarea id="prompt-${stepId}" placeholder="${type === 'batch' ? 'Enter one item per line...' : `Enter prompt for Step ${stepId}...`}" oninput="saveDraft()">${promptText}</textarea>
+                <textarea id="prompt-${stepId}" placeholder="${type === 'batch' ? 'Enter one item per line...' : `Enter prompt for Step ${stepId}...`}" oninput="saveDraft(); autoResize(this)" style="overflow-y: hidden; resize: none; min-height: 120px;">${promptText}</textarea>
                 <div class="options">
                     <input type="checkbox" id="newchat-${stepId}" onchange="saveDraft()" ${isNewChat ? 'checked' : ''}>
                     <label for="newchat-${stepId}">Start New Chat for this step</label>
@@ -270,8 +276,11 @@
             `;
 
             container.appendChild(stepDiv);
+            const textarea = document.getElementById(`prompt-${stepId}`);
+            if (textarea) autoResize(textarea);
             updateToolbars();
             saveDraft();
+            return stepId;
         }
 
         function handleTypeChange(stepId) {
@@ -301,6 +310,7 @@
             textarea.selectionStart = startPos + textToInsert.length;
             textarea.selectionEnd = startPos + textToInsert.length;
             textarea.focus();
+            autoResize(textarea);
             saveDraft();
         }
 
@@ -504,6 +514,11 @@
             document.getElementById('attachment-badge').style.display = 'none';
         }
 
+        function autoResize(textarea) {
+            textarea.style.height = 'auto';
+            textarea.style.height = textarea.scrollHeight + 'px';
+        }
+
         function saveCurrentToLibrary() {
             if (stepCount === 0) return;
             const lastPrompt = document.getElementById(`prompt-${stepCount}`).value;
@@ -589,6 +604,77 @@
             }, 100);
         }
 
+        function exportWorkflow() {
+            if (stepCount === 0) return alert("No workflow to export.");
+
+            const steps = [];
+            for (let i = 1; i <= stepCount; i++) {
+                const prompt = document.getElementById(`prompt-${i}`).value;
+                const newChat = document.getElementById(`newchat-${i}`).checked;
+                const type = document.getElementById(`type-${i}`).value;
+
+                const aliasSpan = document.getElementById(`alias-${i}`);
+                const alias = (aliasSpan && aliasSpan.innerText !== '+ Add Alias' && aliasSpan.innerText !== '') ? aliasSpan.innerText : null;
+
+                steps.push({ prompt, new_chat: newChat, type, alias });
+            }
+
+            const blob = new Blob([JSON.stringify(steps, null, 2)], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'my_workflow.json';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        }
+
+        function importWorkflow(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            if (stepCount > 0 && !confirm("Importing a workflow will overwrite your current workspace. Continue?")) {
+                event.target.value = '';
+                return;
+            }
+
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                try {
+                    const steps = JSON.parse(e.target.result);
+                    if (!Array.isArray(steps)) throw new Error("Invalid workflow format.");
+
+                    document.getElementById('workflow-steps').innerHTML = '';
+                    stepCount = 0;
+
+                    steps.forEach((step, index) => {
+                        const stepId = addStep(step.prompt, step.new_chat, step.type || 'prompt');
+
+                        // Set alias if it exists
+                        if (step.alias) {
+                            const aliasSpan = document.getElementById(`alias-${stepId}`);
+                            if (aliasSpan) {
+                                aliasSpan.innerText = step.alias;
+                            }
+                        }
+                    });
+
+                    setTimeout(() => {
+                        const firstStepSelect = document.getElementById('type-1');
+                        if (firstStepSelect && firstStepSelect.value === 'batch') handleTypeChange(1);
+                        updateToolbars();
+                        saveDraft();
+                    }, 100);
+
+                } catch (err) {
+                    alert("Error importing workflow: " + err.message);
+                }
+                event.target.value = ''; // Reset input
+            };
+            reader.readAsText(file);
+        }
+
         function closeModal() {
             document.getElementById('edit-modal').style.display = 'none';
         }
@@ -655,11 +741,26 @@
             });
 
             try {
-                const response = await fetch('/test_step', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ prompt, new_chat: newChat, mock_data: mockData })
-                });
+                let response;
+                // If we have a global attachment, send as FormData for multi-modal test
+                if (currentAttachment) {
+                    const formData = new FormData();
+                    formData.append('prompt', prompt);
+                    formData.append('new_chat', newChat);
+                    formData.append('mock_data', JSON.stringify(mockData));
+                    formData.append('file', currentAttachment);
+
+                    response = await fetch('/test_step', {
+                        method: 'POST',
+                        body: formData
+                    });
+                } else {
+                    response = await fetch('/test_step', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ prompt, new_chat: newChat, mock_data: mockData })
+                    });
+                }
 
                 const data = await response.json();
 

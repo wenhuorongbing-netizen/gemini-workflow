@@ -7,6 +7,7 @@ import logging
 from bot import GeminiBot
 import json
 import re
+import shutil
 
 app = FastAPI()
 templates = Jinja2Templates(directory="templates")
@@ -266,11 +267,30 @@ async def test_step(request: Request):
     if bot_lock.locked():
         return {"error": "A workflow is currently running. Please wait for it to finish."}
 
+    file_path = None
     try:
-        data = await request.json()
-        prompt = data.get('prompt', '')
-        mock_data = data.get('mock_data', {})
-        new_chat = data.get('new_chat', False)
+        content_type = request.headers.get("Content-Type", "")
+
+        if "multipart/form-data" in content_type:
+            form = await request.form()
+            prompt = form.get('prompt', '')
+            mock_data = json.loads(form.get('mock_data', '{}'))
+            new_chat = form.get('new_chat') == 'true'
+
+            # Extract optional file
+            file = form.get("file")
+            if file and file.filename:
+                os.makedirs("uploads", exist_ok=True)
+                safe_filename = os.path.basename(file.filename)
+                file_path = os.path.join("uploads", safe_filename)
+                content = await file.read()
+                with open(file_path, "wb") as buffer:
+                    buffer.write(content)
+        else:
+            data = await request.json()
+            prompt = data.get('prompt', '')
+            mock_data = data.get('mock_data', {})
+            new_chat = data.get('new_chat', False)
 
         if not prompt:
             return {"error": "No prompt provided."}
@@ -298,6 +318,9 @@ async def test_step(request: Request):
             if new_chat:
                 await current_bot.start_new_chat()
 
+            if file_path:
+                await current_bot.upload_file(file_path)
+
             await current_bot.send_prompt(final_prompt)
             await current_bot.wait_for_response()
             result = await current_bot.get_last_response()
@@ -307,6 +330,13 @@ async def test_step(request: Request):
     except Exception as e:
         logging.error(f"Error in test step: {e}")
         return {"error": str(e)}
+    finally:
+        # Cleanup uploaded test file if it exists
+        if file_path and os.path.exists(file_path):
+            try:
+                os.remove(file_path)
+            except Exception as e:
+                logging.error(f"Failed to delete temporary test file: {e}")
 
 if __name__ == '__main__':
     import uvicorn
