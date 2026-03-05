@@ -27,6 +27,7 @@
         .step-container.is-completed::after { content: '✅'; position: absolute; top: 10px; right: 10px; font-size: 1.5em; }
         .step-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; }
         .step-title { font-weight: bold; font-size: 1.1em; color: #2980b9; display: flex; align-items: center; gap: 10px; }
+        .step-alias { font-size: 0.85em; color: #7f8c8d; font-weight: normal; margin-left: 5px; cursor: pointer; border-bottom: 1px dashed #7f8c8d; }
         .step-controls button { background: none; border: none; cursor: pointer; font-size: 18px; color: #7f8c8d; margin-left: 5px; }
         .step-controls button:hover { color: #34495e; }
 
@@ -70,6 +71,10 @@
         .result-text table { border-collapse: collapse; width: 100%; margin-bottom: 10px; }
         .result-text th, .result-text td { border: 1px solid #ccc; padding: 8px; text-align: left; }
         .result-text th { background-color: #f2f2f2; }
+
+        details { background-color: white; border: 1px solid #ddd; border-radius: 4px; margin-bottom: 10px; }
+        summary { padding: 10px; font-weight: bold; cursor: pointer; background-color: #f8f9fa; border-bottom: 1px solid #ddd; outline: none; }
+        details > .result-text { border: none; border-radius: 0; max-height: none; }
 
         #execution-progress-container { width: 100%; background-color: #ddd; height: 10px; position: fixed; top: 0; left: 0; z-index: 1000; display: none; }
         #execution-progress { width: 0%; height: 100%; background-color: #2ecc71; transition: width 0.3s; }
@@ -159,6 +164,23 @@
         </div>
     </div>
 
+    <!-- Test Step Modal -->
+    <div id="test-modal" class="modal">
+        <div class="modal-content" style="width: 400px; text-align: left;">
+            <h3 style="text-align: center;">⚡ Test Step <span id="test-step-id-display"></span></h3>
+            <div id="test-mock-inputs" style="margin-bottom: 20px;"></div>
+            <input type="hidden" id="test-step-id">
+            <div style="text-align: center;">
+                <button class="btn btn-run" onclick="executeTestStep()" id="execute-test-btn">▶ Run Test</button>
+                <button class="btn" onclick="closeTestModal()">Cancel</button>
+            </div>
+            <div id="test-result-container" style="display: none; margin-top: 15px; border-top: 1px solid #ccc; padding-top: 15px;">
+                <strong style="color: #27ae60;">Result:</strong>
+                <div id="test-result-text" class="result-text" style="margin-top: 10px;"></div>
+            </div>
+        </div>
+    </div>
+
     <script>
         let stepCount = 0;
         let promptLibrary = JSON.parse(localStorage.getItem('geminiPrompts')) || {};
@@ -179,7 +201,7 @@
         });
 
         // --- UI Interactions ---
-        function addStep(promptText = '', isNewChat = false, type = 'prompt') {
+        function addStep(promptText = '', isNewChat = false, type = 'prompt', alias = '') {
             stepCount++;
             const stepId = stepCount;
             const container = document.getElementById('workflow-steps');
@@ -199,13 +221,32 @@
             }
 
             for (let i = 1; i < stepId; i++) {
-                toolbarHtml += '<button type="button" onclick="insertVariable(' + stepId + ', ' + i + ')">+ {% raw %}{{OUTPUT_{% endraw %}' + i + '{% raw %}}}{% endraw %}</button>';
+                // Get alias if exists
+                let aliasDisplay = '';
+                let varName = `OUTPUT_${i}`;
+                const prevStep = document.getElementById(`step-${i}`);
+                if (prevStep) {
+                    const aliasSpan = prevStep.querySelector('.step-alias');
+                    if (aliasSpan && aliasSpan.innerText !== '+ Add Alias' && aliasSpan.innerText !== '') {
+                        aliasDisplay = `: ${aliasSpan.innerText}`;
+                        varName = `OUTPUT_${i}:${aliasSpan.innerText}`;
+                    }
+                }
+                const escapedVarName = varName.replace(/'/g, "\\'").replace(/"/g, "&quot;");
+                const safeDisplayVar = varName.replace(/</g, "&lt;").replace(/>/g, "&gt;");
+                toolbarHtml += `<button type="button" onclick="insertVariable(${stepId}, '${escapedVarName}')" title="Insert Output from Step ${i}">+ {% raw %}{{${safeDisplayVar}}}{% endraw %}</button>`;
             }
+
+            const displayAlias = alias || '+ Add Alias';
 
             stepDiv.innerHTML = `
                 <div class="step-header">
-                    <span class="step-title">Step ${stepId}</span>
+                    <span class="step-title">
+                        Step ${stepId}
+                        <span class="step-alias" id="alias-${stepId}" onclick="setAlias(${stepId})" title="Click to rename step">${displayAlias}</span>
+                    </span>
                     <div class="step-controls">
+                        <button onclick="openTestModal(${stepId})" title="Test this step only" style="color: #f39c12; font-size: 16px;">⚡</button>
                         <button onclick="moveStepUp(${stepId})" title="Move Up">↑</button>
                         <button onclick="moveStepDown(${stepId})" title="Move Down">↓</button>
                         <button onclick="deleteStep(${stepId})" title="Delete" style="color: #e74c3c;">×</button>
@@ -298,10 +339,16 @@
                 const newId = stepCount;
 
                 step.id = `step-${newId}`;
-                step.querySelector('.step-title').innerText = `Step ${newId}`;
+
+                // Preserve alias when renumbering
+                const aliasSpan = step.querySelector('.step-alias');
+                const currentAlias = aliasSpan ? aliasSpan.innerText : '+ Add Alias';
+
+                step.querySelector('.step-title').innerHTML = `Step ${newId} <span class="step-alias" id="alias-${newId}" onclick="setAlias(${newId})" title="Click to rename step">${currentAlias}</span>`;
 
                 const controls = step.querySelector('.step-controls');
                 controls.innerHTML = `
+                    <button onclick="openTestModal(${newId})" title="Test this step only" style="color: #f39c12; font-size: 16px;">⚡</button>
                     <button onclick="moveStepUp(${newId})" title="Move Up">↑</button>
                     <button onclick="moveStepDown(${newId})" title="Move Down">↓</button>
                     <button onclick="deleteStep(${newId})" title="Delete" style="color: #e74c3c;">×</button>
@@ -332,6 +379,19 @@
             updateToolbars();
         }
 
+        function setAlias(stepId) {
+            const currentAliasSpan = document.getElementById(`alias-${stepId}`);
+            let currentName = currentAliasSpan.innerText;
+            if (currentName === '+ Add Alias') currentName = '';
+
+            const newAlias = prompt(`Enter a name for Step ${stepId} (e.g., "Translate" or "Extract")`, currentName);
+            if (newAlias !== null) {
+                currentAliasSpan.innerText = newAlias.trim() || '+ Add Alias';
+                updateToolbars();
+                saveDraft();
+            }
+        }
+
         function updateToolbars() {
             // Re-fetch all elements to ensure we are referencing live DOM nodes
             const firstStepSelect = document.getElementById('type-1');
@@ -346,16 +406,29 @@
                         html += '<button type="button" class="btn-current-item" onclick="insertCurrentItem(' + i + ')">+ {% raw %}{{CURRENT_ITEM}}{% endraw %}</button>';
                     }
                     for (let j = 1; j < i; j++) {
-                        html += '<button type="button" class="btn-variable" onclick="insertVariable(' + i + ', ' + j + ')">+ {% raw %}{{OUTPUT_{% endraw %}' + j + '{% raw %}}}{% endraw %}</button>';
+                        let aliasDisplay = '';
+                        let varName = `OUTPUT_${j}`;
+                        const prevStep = document.getElementById(`step-${j}`);
+                        if (prevStep) {
+                            const aliasSpan = prevStep.querySelector('.step-alias');
+                            if (aliasSpan && aliasSpan.innerText !== '+ Add Alias' && aliasSpan.innerText !== '') {
+                                aliasDisplay = `: ${aliasSpan.innerText}`;
+                                varName = `OUTPUT_${j}:${aliasSpan.innerText}`;
+                            }
+                        }
+
+                        const escapedVarName = varName.replace(/'/g, "\\'").replace(/"/g, "&quot;");
+                        const safeDisplayVar = varName.replace(/</g, "&lt;").replace(/>/g, "&gt;");
+                        html += `<button type="button" class="btn-variable" onclick="insertVariable(${i}, '${escapedVarName}')" title="Insert Output from Step ${j}">+ {% raw %}{{${safeDisplayVar}}}{% endraw %}</button>`;
                     }
                     toolbar.innerHTML = html ? '<span>Insert Context: </span>' + html : '<span style="color:#7f8c8d; font-size:0.85em;">No previous context available.</span>';
                 }
             }
         }
 
-        function insertVariable(stepId, varId) {
+        function insertVariable(stepId, varName) {
             const textarea = document.getElementById(`prompt-${stepId}`);
-            const textToInsert = '{% raw %}{{OUTPUT_{% endraw %}' + varId + '{% raw %}}}{% endraw %}';
+            const textToInsert = `{% raw %}{{${varName}}}{% endraw %}`;
 
             const startPos = textarea.selectionStart;
             const endPos = textarea.selectionEnd;
@@ -377,7 +450,11 @@
                 const prompt = document.getElementById(`prompt-${i}`).value;
                 const newChat = document.getElementById(`newchat-${i}`).checked;
                 const type = document.getElementById(`type-${i}`) ? document.getElementById(`type-${i}`).value : 'prompt';
-                steps.push({ prompt, new_chat: newChat, type });
+
+                const aliasSpan = document.getElementById(`alias-${i}`);
+                const alias = (aliasSpan && aliasSpan.innerText !== '+ Add Alias') ? aliasSpan.innerText : '';
+
+                steps.push({ prompt, new_chat: newChat, type, alias });
             }
             localStorage.setItem('geminiDraft', JSON.stringify(steps));
         }
@@ -385,7 +462,7 @@
         function loadDraft() {
             const draft = JSON.parse(localStorage.getItem('geminiDraft'));
             if (draft && draft.length > 0) {
-                draft.forEach(step => addStep(step.prompt, step.new_chat, step.type || 'prompt'));
+                draft.forEach(step => addStep(step.prompt, step.new_chat, step.type || 'prompt', step.alias || ''));
             } else {
                 addStep();
             }
@@ -514,6 +591,95 @@
 
         function closeModal() {
             document.getElementById('edit-modal').style.display = 'none';
+        }
+
+        function openTestModal(stepId) {
+            document.getElementById('test-step-id').value = stepId;
+            document.getElementById('test-step-id-display').innerText = stepId;
+            document.getElementById('test-result-container').style.display = 'none';
+            document.getElementById('test-result-text').innerHTML = '';
+
+            const promptText = document.getElementById(`prompt-${stepId}`).value;
+            const inputsContainer = document.getElementById('test-mock-inputs');
+            inputsContainer.innerHTML = '';
+
+            // Extract all {{OUTPUT_X}} and {{CURRENT_ITEM}} variables
+            const regex = /\{\{(CURRENT_ITEM|OUTPUT_\d+(?::.*?)?)\}\}/g;
+            const matches = [...promptText.matchAll(regex)].map(m => m[1]);
+            const uniqueVars = [...new Set(matches)];
+
+            if (uniqueVars.length === 0) {
+                inputsContainer.innerHTML = '<p style="color: #7f8c8d; font-size: 0.9em; text-align: center;">No variables detected in this prompt.</p>';
+            } else {
+                inputsContainer.innerHTML = '<p style="font-size: 0.9em; margin-bottom: 10px;">Please provide mock data for the variables:</p>';
+                uniqueVars.forEach(v => {
+                    inputsContainer.innerHTML += `
+                        <div style="margin-bottom: 10px;">
+                            <label style="display: block; font-size: 0.85em; font-weight: bold; margin-bottom: 5px;">{% raw %}{{${v}}}{% endraw %}</label>
+                            <textarea id="mock-${v}" rows="3" style="width: 100%; padding: 5px; border: 1px solid #ccc; border-radius: 4px;"></textarea>
+                        </div>
+                    `;
+                });
+            }
+
+            document.getElementById('test-modal').style.display = 'block';
+        }
+
+        function closeTestModal() {
+            document.getElementById('test-modal').style.display = 'none';
+        }
+
+        async function executeTestStep() {
+            const stepId = document.getElementById('test-step-id').value;
+            const prompt = document.getElementById(`prompt-${stepId}`).value.trim();
+            const newChat = document.getElementById(`newchat-${stepId}`).checked;
+
+            if (!prompt) return alert("Prompt is empty.");
+
+            const btn = document.getElementById('execute-test-btn');
+            const resultContainer = document.getElementById('test-result-container');
+            const resultText = document.getElementById('test-result-text');
+
+            btn.disabled = true;
+            btn.innerText = "⏳ Running...";
+            resultContainer.style.display = 'none';
+
+            // Gather mock data
+            const mockData = {};
+            const regex = /\{\{(CURRENT_ITEM|OUTPUT_\d+(?::.*?)?)\}\}/g;
+            const matches = [...new Set([...prompt.matchAll(regex)].map(m => m[1]))];
+
+            matches.forEach(v => {
+                const el = document.getElementById(`mock-${v}`);
+                if (el) mockData[v] = el.value;
+            });
+
+            try {
+                const response = await fetch('/test_step', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ prompt, new_chat: newChat, mock_data: mockData })
+                });
+
+                const data = await response.json();
+
+                resultContainer.style.display = 'block';
+                if (data.error) {
+                    resultText.innerHTML = `<span style="color: red;">Error: ${data.error}</span>`;
+                } else {
+                    try {
+                         resultText.innerHTML = DOMPurify.sanitize(marked.parse(data.result));
+                    } catch (e) {
+                         resultText.textContent = data.result;
+                    }
+                }
+            } catch (err) {
+                resultContainer.style.display = 'block';
+                resultText.innerHTML = `<span style="color: red;">Network Error: ${err.message}</span>`;
+            } finally {
+                btn.disabled = false;
+                btn.innerText = "▶ Run Test";
+            }
         }
 
         function confirmEditPrompt() {
@@ -677,27 +843,70 @@
 
                                 // Check if we received a completed result chunk for a step
                                 if (data.result !== undefined && data.step) {
-                                     const div = document.createElement('div');
-                                     div.className = 'result-item';
+                                    // Check if it's a batch result (starts with [Item X])
+                                    const match = data.result.match(/^\[Item (\d+)\]:\s*(.*)/s);
 
-                                     const titleDiv = document.createElement('div');
-                                     titleDiv.className = 'result-title';
-                                     titleDiv.textContent = `Output of Step ${data.step}:`;
+                                    if (match) {
+                                        const iterationNum = match[1];
+                                        const actualContent = match[2];
 
-                                     const textDiv = document.createElement('div');
-                                     textDiv.className = 'result-text';
+                                        // See if we already have a container for this step
+                                        let stepContainer = document.getElementById(`batch-results-step-${data.step}`);
+                                        if (!stepContainer) {
+                                            stepContainer = document.createElement('div');
+                                            stepContainer.id = `batch-results-step-${data.step}`;
+                                            stepContainer.className = 'result-item';
 
-                                     // Use marked.parse to convert Markdown to HTML safely
-                                     try {
-                                         textDiv.innerHTML = DOMPurify.sanitize(marked.parse(data.result));
-                                     } catch (e) {
-                                         console.error("Markdown parsing error", e);
-                                         textDiv.textContent = data.result; // Fallback
-                                     }
+                                            const titleDiv = document.createElement('div');
+                                            titleDiv.className = 'result-title';
+                                            titleDiv.textContent = `Output of Step ${data.step} (Batch Results):`;
+                                            stepContainer.appendChild(titleDiv);
 
-                                     div.appendChild(titleDiv);
-                                     div.appendChild(textDiv);
-                                     resultsList.appendChild(div);
+                                            resultsList.appendChild(stepContainer);
+                                        }
+
+                                        const details = document.createElement('details');
+                                        // Auto-expand the first item, keep others collapsed
+                                        if (iterationNum === "1") details.open = true;
+
+                                        const summary = document.createElement('summary');
+                                        summary.textContent = `▶ Item ${iterationNum}`;
+
+                                        const textDiv = document.createElement('div');
+                                        textDiv.className = 'result-text';
+
+                                        try {
+                                            textDiv.innerHTML = DOMPurify.sanitize(marked.parse(actualContent));
+                                        } catch (e) {
+                                            textDiv.textContent = actualContent;
+                                        }
+
+                                        details.appendChild(summary);
+                                        details.appendChild(textDiv);
+                                        stepContainer.appendChild(details);
+
+                                    } else {
+                                         // Standard single result
+                                         const div = document.createElement('div');
+                                         div.className = 'result-item';
+
+                                         const titleDiv = document.createElement('div');
+                                         titleDiv.className = 'result-title';
+                                         titleDiv.textContent = `Output of Step ${data.step}:`;
+
+                                         const textDiv = document.createElement('div');
+                                         textDiv.className = 'result-text';
+
+                                         try {
+                                             textDiv.innerHTML = DOMPurify.sanitize(marked.parse(data.result));
+                                         } catch (e) {
+                                             textDiv.textContent = data.result;
+                                         }
+
+                                         div.appendChild(titleDiv);
+                                         div.appendChild(textDiv);
+                                         resultsList.appendChild(div);
+                                    }
                                 }
 
                             } catch (e) {

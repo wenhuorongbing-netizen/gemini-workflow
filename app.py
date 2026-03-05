@@ -6,6 +6,7 @@ import os
 import logging
 from bot import GeminiBot
 import json
+import re
 
 app = FastAPI()
 templates = Jinja2Templates(directory="templates")
@@ -162,16 +163,19 @@ async def execute_workflow(request: Request):
 
                         # Look through all possible previous steps
                         for past_index in range(1, step_id):
-                            tag = f"{{{{OUTPUT_{past_index}}}}}"
-                            if tag in final_prompt:
+                            # Create a regex to match either standard {{OUTPUT_X}} or aliased {{OUTPUT_X: Alias Name}}
+                            pattern = r'\{\{OUTPUT_' + str(past_index) + r'(?::.*?)?\}\}'
+
+                            if re.search(pattern, final_prompt):
                                 # Try to get the output from the current iteration first (if previous step was a batch step)
                                 iteration_key = f"{past_index}_{iteration_id}"
                                 standard_key = str(past_index)
+                                replacement_text = None
 
                                 if iteration_key in results:
-                                    final_prompt = final_prompt.replace(tag, results[iteration_key])
+                                    replacement_text = results[iteration_key]
                                 elif standard_key in results:
-                                    final_prompt = final_prompt.replace(tag, results[standard_key])
+                                    replacement_text = results[standard_key]
                                 else:
                                     # This implies the previous step was a batch step, but we are in a non-batch step.
                                     # We need to aggregate the results.
@@ -182,7 +186,10 @@ async def execute_workflow(request: Request):
                                             aggregated_results.append(f"--- Item {i} ---\n{results[key]}")
 
                                     if aggregated_results:
-                                        final_prompt = final_prompt.replace(tag, "\n\n".join(aggregated_results))
+                                        replacement_text = "\n\n".join(aggregated_results)
+
+                                if replacement_text is not None:
+                                    final_prompt = re.sub(pattern, lambda m: replacement_text, final_prompt)
 
                         yield f"data: {json.dumps({'step': step_id, 'status': 'Sending', 'message': 'Sending prompt to Gemini...'})}\n\n"
 
@@ -249,6 +256,57 @@ async def execute_workflow(request: Request):
     # This prevents the long-running process from timing out the HTTP connection
     # and provides real-time feedback to the UI.
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+@app.post("/test_step")
+async def test_step(request: Request):
+    """
+    Executes a single step for local testing with mock data.
+    Returns a standard JSON response to simplify the UI handling.
+    """
+    if bot_lock.locked():
+        return {"error": "A workflow is currently running. Please wait for it to finish."}
+
+    try:
+        data = await request.json()
+        prompt = data.get('prompt', '')
+        mock_data = data.get('mock_data', {})
+        new_chat = data.get('new_chat', False)
+
+        if not prompt:
+            return {"error": "No prompt provided."}
+
+        # Substitute mock variables into the prompt
+        final_prompt = prompt
+
+        # Replace CURRENT_ITEM
+        if "{{CURRENT_ITEM}}" in final_prompt and "CURRENT_ITEM" in mock_data:
+            final_prompt = final_prompt.replace("{{CURRENT_ITEM}}", mock_data["CURRENT_ITEM"])
+
+        # Replace OUTPUT_X (including aliases)
+        for key, value in mock_data.items():
+            if key.startswith("OUTPUT_"):
+                # Use regex to match either exact or aliased.
+                # Escape key to prevent regex errors if the alias contains special characters.
+                escaped_key = re.escape(key)
+                pattern = r'\{\{' + escaped_key + r'(?::.*?)?\}\}'
+                final_prompt = re.sub(pattern, lambda m: value, final_prompt)
+
+        # Now execute the single step
+        async with bot_lock:
+            current_bot = await get_bot()
+
+            if new_chat:
+                await current_bot.start_new_chat()
+
+            await current_bot.send_prompt(final_prompt)
+            await current_bot.wait_for_response()
+            result = await current_bot.get_last_response()
+
+            return {"result": result}
+
+    except Exception as e:
+        logging.error(f"Error in test step: {e}")
+        return {"error": str(e)}
 
 if __name__ == '__main__':
     import uvicorn
