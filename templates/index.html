@@ -4,6 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Gemini Automation Workflow Builder (FastAPI + Playwright)</title>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/dompurify/dist/purify.min.js"></script>
     <style>
         body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f4f6f8; margin: 0; padding: 20px; display: flex; flex-direction: column; align-items: center; }
         h1 { color: #333; margin-bottom: 20px; text-align: center; }
@@ -69,7 +71,13 @@
 
             <div class="global-actions">
                 <button class="btn btn-add" onclick="addStep()">+ Add Step</button>
+                <div style="display: flex; gap: 10px;">
+                    <button class="btn" style="background-color: #95a5a6; color: white;" onclick="exportWorkflow()">📥 Export Workflow</button>
+                    <button class="btn" style="background-color: #95a5a6; color: white;" onclick="triggerImport()">📤 Import Workflow</button>
+                    <input type="file" id="import-file" style="display:none" accept=".json" onchange="importWorkflow(event)">
+                </div>
                 <button class="btn btn-run" id="run-btn" onclick="executeWorkflow()">▶ Run Workflow</button>
+                <button class="btn" id="stop-btn" onclick="stopWorkflow()" style="display: none; background-color: #e74c3c; color: white;">⏹ Stop Workflow</button>
             </div>
 
             <!-- Server-Sent Events Status Bar -->
@@ -129,7 +137,7 @@
                 <div class="toolbar" id="toolbar-${stepId}">
                     ${toolbarHtml ? '<span>Insert Context: </span>' + toolbarHtml : '<span style="color:#7f8c8d; font-size:0.85em;">No previous context available.</span>'}
                 </div>
-                <textarea id="prompt-${stepId}" placeholder="Enter prompt for Step ${stepId}..." oninput="saveDraft()">${promptText}</textarea>
+                <textarea id="prompt-${stepId}" placeholder="Enter prompt for Step ${stepId}..." oninput="this.style.height='auto'; this.style.height=(this.scrollHeight)+'px'; saveDraft()">${promptText}</textarea>
                 <div class="options">
                     <input type="checkbox" id="newchat-${stepId}" onchange="saveDraft()" ${isNewChat ? 'checked' : ''}>
                     <label for="newchat-${stepId}">Start New Chat for this step</label>
@@ -139,6 +147,15 @@
             container.appendChild(stepDiv);
             updateToolbars();
             saveDraft();
+
+            // Auto-resize on initial load if text exists
+            setTimeout(() => {
+                const ta = document.getElementById(`prompt-${stepId}`);
+                if (ta && ta.value) {
+                    ta.style.height = 'auto';
+                    ta.style.height = (ta.scrollHeight) + 'px';
+                }
+            }, 0);
         }
 
         function deleteStep(id) {
@@ -318,6 +335,78 @@
             }
         }
 
+        // --- Workflow Import/Export ---
+        function exportWorkflow() {
+            const steps = [];
+            for (let i = 1; i <= stepCount; i++) {
+                const promptElem = document.getElementById(`prompt-${i}`);
+                if (!promptElem) continue;
+                const prompt = promptElem.value;
+                const newChat = document.getElementById(`newchat-${i}`).checked;
+                steps.push({ prompt, new_chat: newChat });
+            }
+            if (steps.length === 0) return alert("Nothing to export!");
+
+            const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(steps, null, 2));
+            const downloadAnchorNode = document.createElement('a');
+            downloadAnchorNode.setAttribute("href", dataStr);
+            downloadAnchorNode.setAttribute("download", "gemini_workflow.json");
+            document.body.appendChild(downloadAnchorNode); // required for firefox
+            downloadAnchorNode.click();
+            downloadAnchorNode.remove();
+        }
+
+        function triggerImport() {
+            document.getElementById('import-file').click();
+        }
+
+        function importWorkflow(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                try {
+                    const steps = JSON.parse(e.target.result);
+                    if (Array.isArray(steps)) {
+                        // Clear current board
+                        document.getElementById('workflow-steps').innerHTML = '';
+                        stepCount = 0;
+
+                        // Reconstruct steps
+                        steps.forEach(step => addStep(step.prompt, step.new_chat));
+                        saveDraft();
+
+                        // Reset file input
+                        document.getElementById('import-file').value = '';
+                    } else {
+                        alert("Invalid workflow file format.");
+                    }
+                } catch (err) {
+                    alert("Error parsing workflow file: " + err.message);
+                }
+            };
+            reader.readAsText(file);
+        }
+
+        // --- Page Unload Protection ---
+        function preventClose(e) {
+            e.preventDefault();
+            e.returnValue = '';
+            return '';
+        }
+
+        // --- Emergency Stop ---
+        async function stopWorkflow() {
+            try {
+                await fetch('/stop', { method: 'POST' });
+                document.getElementById('status-bar').innerText = "Stopping workflow...";
+                document.getElementById('status-bar').style.color = '#e74c3c';
+            } catch (error) {
+                console.error("Error stopping workflow", error);
+            }
+        }
+
         // --- Execution (SSE stream parsing) ---
         async function executeWorkflow() {
             const steps = [];
@@ -335,16 +424,20 @@
             if (steps.length === 0) return alert("Please add at least one step.");
 
             const runBtn = document.getElementById('run-btn');
+            const stopBtn = document.getElementById('stop-btn');
             const statusBar = document.getElementById('status-bar');
             const resultsList = document.getElementById('results-list');
             const resultsContainer = document.getElementById('results-container');
 
-            runBtn.disabled = true;
-            runBtn.innerText = "⏳ Running...";
+            runBtn.style.display = 'none';
+            stopBtn.style.display = 'inline-block';
             statusBar.style.display = 'block';
             statusBar.innerText = "Connecting to backend...";
             resultsContainer.style.display = 'block';
             resultsList.innerHTML = '';
+
+            // Enable unload protection
+            window.addEventListener('beforeunload', preventClose);
 
             try {
                 // We use fetch directly to get a reader for the stream
@@ -388,27 +481,79 @@
                                     break;
                                 }
 
+                                if (data.status === 'Canceled') {
+                                    statusBar.innerText = `Canceled: ${data.message || 'Workflow stopped by user'}`;
+                                    statusBar.style.color = '#e74c3c';
+                                    break;
+                                }
+
                                 if (data.step) {
                                     statusBar.innerText = `Step ${data.step} - ${data.status}: ${data.message || ''}`;
+                                    if (data.status === 'Retrying') {
+                                        statusBar.style.color = '#e67e22';
+                                    } else if (data.status === 'Canceled') {
+                                        statusBar.style.color = '#e74c3c';
+                                    } else {
+                                        statusBar.style.color = '#31708f';
+                                    }
+                                }
+
+                                // Handle Typing status for Pseudo-Streaming
+                                if (data.status === 'Typing' && data.step) {
+                                     let div = document.getElementById(`result-step-${data.step}`);
+                                     if (!div) {
+                                         div = document.createElement('div');
+                                         div.className = 'result-item';
+                                         div.id = `result-step-${data.step}`;
+
+                                         const titleDiv = document.createElement('div');
+                                         titleDiv.className = 'result-title';
+                                         titleDiv.textContent = `Output of Step ${data.step} (Typing...):`;
+
+                                         const textDiv = document.createElement('div');
+                                         textDiv.className = 'result-text';
+                                         textDiv.id = `result-text-${data.step}`;
+
+                                         div.appendChild(titleDiv);
+                                         div.appendChild(textDiv);
+                                         resultsList.appendChild(div);
+                                     }
+                                     const textDiv = document.getElementById(`result-text-${data.step}`);
+                                     if (textDiv) {
+                                         textDiv.innerHTML = DOMPurify.sanitize(marked.parse(data.partial_result));
+                                     }
                                 }
 
                                 // Check if we received a completed result chunk for a step
                                 if (data.result !== undefined && data.step) {
-                                     // Append the step result to the DOM dynamically as it arrives, avoiding innerHTML for the result
-                                     const div = document.createElement('div');
-                                     div.className = 'result-item';
+                                     let div = document.getElementById(`result-step-${data.step}`);
+                                     if (!div) {
+                                         div = document.createElement('div');
+                                         div.className = 'result-item';
+                                         div.id = `result-step-${data.step}`;
 
-                                     const titleDiv = document.createElement('div');
-                                     titleDiv.className = 'result-title';
-                                     titleDiv.textContent = `Output of Step ${data.step}:`;
+                                         const titleDiv = document.createElement('div');
+                                         titleDiv.className = 'result-title';
+                                         titleDiv.id = `result-title-${data.step}`;
 
-                                     const textDiv = document.createElement('div');
-                                     textDiv.className = 'result-text';
-                                     textDiv.textContent = data.result; // Use textContent to prevent XSS
+                                         const textDiv = document.createElement('div');
+                                         textDiv.className = 'result-text';
+                                         textDiv.id = `result-text-${data.step}`;
 
-                                     div.appendChild(titleDiv);
-                                     div.appendChild(textDiv);
-                                     resultsList.appendChild(div);
+                                         div.appendChild(titleDiv);
+                                         div.appendChild(textDiv);
+                                         resultsList.appendChild(div);
+                                     }
+
+                                     const titleDiv = div.querySelector('.result-title') || document.getElementById(`result-title-${data.step}`);
+                                     if (titleDiv) {
+                                         titleDiv.textContent = `Output of Step ${data.step}:`;
+                                     }
+
+                                     const textDiv = document.getElementById(`result-text-${data.step}`);
+                                     if (textDiv) {
+                                         textDiv.innerHTML = DOMPurify.sanitize(marked.parse(data.result));
+                                     }
                                 }
 
                             } catch (e) {
@@ -422,8 +567,11 @@
                 statusBar.innerText = `Network Error: ${error.message}`;
                 statusBar.style.color = 'red';
             } finally {
-                runBtn.disabled = false;
-                runBtn.innerText = "▶ Run Workflow";
+                runBtn.style.display = 'inline-block';
+                stopBtn.style.display = 'none';
+
+                // Disable unload protection
+                window.removeEventListener('beforeunload', preventClose);
             }
         }
     </script>
