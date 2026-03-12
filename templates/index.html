@@ -390,6 +390,11 @@
 
                                 if (data.step) {
                                     statusBar.innerText = `Step ${data.step} - ${data.status}: ${data.message || ''}`;
+                                    if (data.status === 'Retrying') {
+                                        statusBar.style.color = '#e67e22';
+                                    } else {
+                                        statusBar.style.color = '#31708f';
+                                    }
                                 }
 
                                 // Check if we received a completed result chunk for a step

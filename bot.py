@@ -3,7 +3,14 @@ import logging
 from playwright.async_api import async_playwright, Page, BrowserContext
 from typing import Optional
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s',
+    handlers=[
+        logging.FileHandler("gemini_workflow_error.log"),
+        logging.StreamHandler()
+    ]
+)
 
 class GeminiBot:
     def __init__(self, profile_path="chrome_profile"):
