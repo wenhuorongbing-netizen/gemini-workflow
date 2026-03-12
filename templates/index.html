@@ -70,6 +70,7 @@
             <div class="global-actions">
                 <button class="btn btn-add" onclick="addStep()">+ Add Step</button>
                 <button class="btn btn-run" id="run-btn" onclick="executeWorkflow()">▶ Run Workflow</button>
+                <button class="btn" id="stop-btn" onclick="stopWorkflow()" style="display: none; background-color: #e74c3c; color: white;">⏹ Stop Workflow</button>
             </div>
 
             <!-- Server-Sent Events Status Bar -->
@@ -318,6 +319,24 @@
             }
         }
 
+        // --- Page Unload Protection ---
+        function preventClose(e) {
+            e.preventDefault();
+            e.returnValue = '';
+            return '';
+        }
+
+        // --- Emergency Stop ---
+        async function stopWorkflow() {
+            try {
+                await fetch('/stop', { method: 'POST' });
+                document.getElementById('status-bar').innerText = "Stopping workflow...";
+                document.getElementById('status-bar').style.color = '#e74c3c';
+            } catch (error) {
+                console.error("Error stopping workflow", error);
+            }
+        }
+
         // --- Execution (SSE stream parsing) ---
         async function executeWorkflow() {
             const steps = [];
@@ -335,16 +354,20 @@
             if (steps.length === 0) return alert("Please add at least one step.");
 
             const runBtn = document.getElementById('run-btn');
+            const stopBtn = document.getElementById('stop-btn');
             const statusBar = document.getElementById('status-bar');
             const resultsList = document.getElementById('results-list');
             const resultsContainer = document.getElementById('results-container');
 
-            runBtn.disabled = true;
-            runBtn.innerText = "⏳ Running...";
+            runBtn.style.display = 'none';
+            stopBtn.style.display = 'inline-block';
             statusBar.style.display = 'block';
             statusBar.innerText = "Connecting to backend...";
             resultsContainer.style.display = 'block';
             resultsList.innerHTML = '';
+
+            // Enable unload protection
+            window.addEventListener('beforeunload', preventClose);
 
             try {
                 // We use fetch directly to get a reader for the stream
@@ -388,32 +411,79 @@
                                     break;
                                 }
 
+                                if (data.status === 'Canceled') {
+                                    statusBar.innerText = `Canceled: ${data.message || 'Workflow stopped by user'}`;
+                                    statusBar.style.color = '#e74c3c';
+                                    break;
+                                }
+
                                 if (data.step) {
                                     statusBar.innerText = `Step ${data.step} - ${data.status}: ${data.message || ''}`;
                                     if (data.status === 'Retrying') {
                                         statusBar.style.color = '#e67e22';
+                                    } else if (data.status === 'Canceled') {
+                                        statusBar.style.color = '#e74c3c';
                                     } else {
                                         statusBar.style.color = '#31708f';
                                     }
                                 }
 
+                                // Handle Typing status for Pseudo-Streaming
+                                if (data.status === 'Typing' && data.step) {
+                                     let div = document.getElementById(`result-step-${data.step}`);
+                                     if (!div) {
+                                         div = document.createElement('div');
+                                         div.className = 'result-item';
+                                         div.id = `result-step-${data.step}`;
+
+                                         const titleDiv = document.createElement('div');
+                                         titleDiv.className = 'result-title';
+                                         titleDiv.textContent = `Output of Step ${data.step} (Typing...):`;
+
+                                         const textDiv = document.createElement('div');
+                                         textDiv.className = 'result-text';
+                                         textDiv.id = `result-text-${data.step}`;
+
+                                         div.appendChild(titleDiv);
+                                         div.appendChild(textDiv);
+                                         resultsList.appendChild(div);
+                                     }
+                                     const textDiv = document.getElementById(`result-text-${data.step}`);
+                                     if (textDiv) {
+                                         textDiv.textContent = data.partial_result;
+                                     }
+                                }
+
                                 // Check if we received a completed result chunk for a step
                                 if (data.result !== undefined && data.step) {
-                                     // Append the step result to the DOM dynamically as it arrives, avoiding innerHTML for the result
-                                     const div = document.createElement('div');
-                                     div.className = 'result-item';
+                                     let div = document.getElementById(`result-step-${data.step}`);
+                                     if (!div) {
+                                         div = document.createElement('div');
+                                         div.className = 'result-item';
+                                         div.id = `result-step-${data.step}`;
 
-                                     const titleDiv = document.createElement('div');
-                                     titleDiv.className = 'result-title';
-                                     titleDiv.textContent = `Output of Step ${data.step}:`;
+                                         const titleDiv = document.createElement('div');
+                                         titleDiv.className = 'result-title';
+                                         titleDiv.id = `result-title-${data.step}`;
 
-                                     const textDiv = document.createElement('div');
-                                     textDiv.className = 'result-text';
-                                     textDiv.textContent = data.result; // Use textContent to prevent XSS
+                                         const textDiv = document.createElement('div');
+                                         textDiv.className = 'result-text';
+                                         textDiv.id = `result-text-${data.step}`;
 
-                                     div.appendChild(titleDiv);
-                                     div.appendChild(textDiv);
-                                     resultsList.appendChild(div);
+                                         div.appendChild(titleDiv);
+                                         div.appendChild(textDiv);
+                                         resultsList.appendChild(div);
+                                     }
+
+                                     const titleDiv = div.querySelector('.result-title') || document.getElementById(`result-title-${data.step}`);
+                                     if (titleDiv) {
+                                         titleDiv.textContent = `Output of Step ${data.step}:`;
+                                     }
+
+                                     const textDiv = document.getElementById(`result-text-${data.step}`);
+                                     if (textDiv) {
+                                         textDiv.textContent = data.result;
+                                     }
                                 }
 
                             } catch (e) {
@@ -427,8 +497,11 @@
                 statusBar.innerText = `Network Error: ${error.message}`;
                 statusBar.style.color = 'red';
             } finally {
-                runBtn.disabled = false;
-                runBtn.innerText = "▶ Run Workflow";
+                runBtn.style.display = 'inline-block';
+                stopBtn.style.display = 'none';
+
+                // Disable unload protection
+                window.removeEventListener('beforeunload', preventClose);
             }
         }
     </script>
