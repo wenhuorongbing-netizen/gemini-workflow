@@ -19,16 +19,16 @@ logging.basicConfig(
 
 # Global bot instance to maintain session state asynchronously
 bot = None
-# A simple async lock to prevent concurrent executions messing up the browser
-bot_lock = None
+# A simple async semaphore to allow concurrent executions up to a limit
+bot_semaphore = None
 # Global event to signal emergency stop
 cancel_event = None
 
 @app.on_event("startup")
 async def startup_event():
-    global bot_lock
+    global bot_semaphore
     global cancel_event
-    bot_lock = asyncio.Lock()
+    bot_semaphore = asyncio.Semaphore(3)
     cancel_event = asyncio.Event()
 
 @app.post("/stop")
@@ -58,9 +58,9 @@ async def execute_workflow(request: Request):
     async def error_stream(msg: str):
         yield f"data: {json.dumps({'error': msg})}\n\n"
 
-    if bot_lock.locked():
+    if bot_semaphore.locked():
         # Reject new requests if a workflow is already running to protect the browser instance
-        return StreamingResponse(error_stream("A workflow is currently running. Please wait for it to finish."), media_type="text/event-stream")
+        return StreamingResponse(error_stream("Server is busy. Please try again later."), media_type="text/event-stream")
 
     try:
         data = await request.json()
@@ -72,11 +72,11 @@ async def execute_workflow(request: Request):
     if not steps:
         return StreamingResponse(error_stream("No steps provided in workflow."), media_type="text/event-stream")
 
-    # Acquire the lock after payload parsing to prevent deadlocks on invalid requests
+    # Acquire the semaphore after payload parsing to prevent deadlocks on invalid requests
     try:
-        await asyncio.wait_for(bot_lock.acquire(), timeout=0.1)
+        await asyncio.wait_for(bot_semaphore.acquire(), timeout=0.1)
     except asyncio.TimeoutError:
-        return StreamingResponse(error_stream("A workflow is currently running. Please wait for it to finish."), media_type="text/event-stream")
+        return StreamingResponse(error_stream("Server is busy. Please try again later."), media_type="text/event-stream")
 
     if cancel_event:
         cancel_event.clear()
@@ -85,9 +85,11 @@ async def execute_workflow(request: Request):
     stream_queue = asyncio.Queue()
 
     async def event_generator():
+        page = None
         try:
             try:
                 current_bot = await get_bot()
+                page = await current_bot.create_new_page()
             except Exception as e:
                 yield f"data: {json.dumps({'error': str(e)})}\n\n"
                 return
@@ -113,7 +115,7 @@ async def execute_workflow(request: Request):
                     try:
                         if new_chat:
                             yield f"data: {json.dumps({'step': step_id, 'status': 'New Chat', 'message': 'Starting new chat...'})}\n\n"
-                            await current_bot.start_new_chat()
+                            await current_bot.start_new_chat(page)
 
                         # Smart Context Injection: Replace {{OUTPUT_X}} with actual results
                         final_prompt = prompt_template
@@ -124,7 +126,7 @@ async def execute_workflow(request: Request):
 
                         yield f"data: {json.dumps({'step': step_id, 'status': 'Sending', 'message': 'Sending prompt to Gemini...'})}\n\n"
                         # Send the final compiled prompt to the bot
-                        await current_bot.send_prompt(final_prompt)
+                        await current_bot.send_prompt(page, final_prompt)
 
                         if cancel_event and cancel_event.is_set():
                             raise asyncio.CancelledError("Workflow stopped by user.")
@@ -139,7 +141,7 @@ async def execute_workflow(request: Request):
                             await stream_queue.put(partial_text)
 
                         # Run wait_for_response in a background task so we can stream from the queue
-                        wait_task = asyncio.create_task(current_bot.wait_for_response(poll_callback=poll_callback))
+                        wait_task = asyncio.create_task(current_bot.wait_for_response(page, poll_callback=poll_callback))
 
                         while not wait_task.done():
                             try:
@@ -161,7 +163,7 @@ async def execute_workflow(request: Request):
 
                         # Extract the output
                         yield f"data: {json.dumps({'step': step_id, 'status': 'Extracting', 'message': 'Extracting response text...'})}\n\n"
-                        response_text = await current_bot.get_last_response()
+                        response_text = await current_bot.get_last_response(page)
 
                         results[str(step_id)] = response_text
 
@@ -191,7 +193,7 @@ async def execute_workflow(request: Request):
                                 pass # Continue retrying
 
                             # Reload the page before retrying to clear stuck state but preserve session/history
-                            await current_bot.page.reload()
+                            await page.reload()
                         else:
                             error_msg = f"Error in Step {step_id}: {str(e)}"
                             logging.error(error_msg)
@@ -206,7 +208,9 @@ async def execute_workflow(request: Request):
 
             yield f"data: {json.dumps({'status': 'Workflow Finished', 'results': results})}\n\n"
         finally:
-            bot_lock.release()
+            if page:
+                await page.close()
+            bot_semaphore.release()
 
     # We use StreamingResponse to send Server-Sent Events (SSE) back to the client
     # This prevents the long-running process from timing out the HTTP connection
