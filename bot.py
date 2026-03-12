@@ -3,7 +3,14 @@ import logging
 from playwright.async_api import async_playwright, Page, BrowserContext
 from typing import Optional
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s',
+    handlers=[
+        logging.FileHandler("gemini_workflow_error.log"),
+        logging.StreamHandler()
+    ]
+)
 
 class GeminiBot:
     def __init__(self, profile_path="chrome_profile"):
@@ -106,11 +113,10 @@ class GeminiBot:
             logging.error(f"{error_msg} - Details: {e}")
             raise Exception(error_msg)
 
-    async def wait_for_response(self, timeout=300000):
+    async def wait_for_response(self, timeout=300000, poll_callback=None):
         """
         Waits for the AI to finish generating the response.
-        Instead of naive polling, it waits for the Send button to become enabled/visible again
-        after the network activity settles down.
+        Polls the DOM for pseudo-streaming updates if poll_callback is provided.
         """
         logging.info("Waiting for Gemini response...")
         try:
@@ -118,11 +124,33 @@ class GeminiBot:
             await self.page.wait_for_timeout(3000)
 
             # Wait for the send button to become interactable again.
-            # When generating, the send button is usually hidden or replaced by a 'Stop' button.
             send_button = self.page.locator("button[aria-label*='Send'], button:has-text('Send')").first
 
-            # Playwright handles the polling efficiently internally
-            await send_button.wait_for(state="visible", timeout=timeout)
+            # If a callback is provided, we poll while waiting for the send button
+            if poll_callback:
+                import time
+                start_time = time.time()
+                while not await send_button.is_visible():
+                    if time.time() - start_time > timeout / 1000:
+                        raise Exception("Timeout exceeded during polling.")
+
+                    try:
+                        # Attempt to extract partial text
+                        partial_text = await self.get_last_response()
+                        if partial_text:
+                            await poll_callback(partial_text)
+                    except Exception as poll_e:
+                        logging.debug(f"Polling partial text failed (normal if generation just started): {poll_e}")
+
+                    # Wait 1 second before polling again, but check if send_button became visible during that second
+                    try:
+                        await send_button.wait_for(state="visible", timeout=1000)
+                        break # Button appeared, we are done
+                    except Exception:
+                        pass # Not visible yet, loop again
+            else:
+                # Playwright handles the polling efficiently internally
+                await send_button.wait_for(state="visible", timeout=timeout)
 
             # Add a small buffer for DOM finalization
             await self.page.wait_for_timeout(2000)
