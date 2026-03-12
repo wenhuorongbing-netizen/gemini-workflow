@@ -21,7 +21,6 @@ class GeminiBot:
         self.profile_path = profile_path
         self.playwright = None
         self.context: Optional[BrowserContext] = None
-        self.page: Optional[Page] = None
         self._initialized = False
 
     async def initialize(self):
@@ -45,66 +44,69 @@ class GeminiBot:
                 ]
             )
 
-            # Use the first open page or create a new one
-            pages = self.context.pages
-            self.page = pages[0] if pages else await self.context.new_page()
-
-            # ⚡ Bolt Optimization: Network Interception
-            # We don't need to load images, fonts, or media to read/write text.
-            # Aborting these requests drastically reduces bandwidth, memory, and TTFB.
-            async def abort_heavy_assets(route):
-                if route.request.resource_type in ["image", "media", "font"]:
-                    await route.abort()
-                else:
-                    await route.continue_()
-
-            await self.page.route("**/*", abort_heavy_assets)
-            logging.info("Network interception active: blocking images, media, and fonts.")
-
-            await self.page.goto("https://gemini.google.com/")
-            logging.info("Playwright initialized and Gemini loaded successfully.")
+            logging.info("Playwright initialized.")
             self._initialized = True
 
         except Exception as e:
             logging.error(f"Failed to initialize Playwright bot: {e}")
             raise
 
-    async def start_new_chat(self):
+    async def create_new_page(self) -> Page:
+        """Asynchronously creates a new page and navigates to Gemini."""
+        page = await self.context.new_page()
+
+        # ⚡ Bolt Optimization: Network Interception
+        # We don't need to load images, fonts, or media to read/write text.
+        # Aborting these requests drastically reduces bandwidth, memory, and TTFB.
+        async def abort_heavy_assets(route):
+            if route.request.resource_type in ["image", "media", "font"]:
+                await route.abort()
+            else:
+                await route.continue_()
+
+        await page.route("**/*", abort_heavy_assets)
+        logging.info("Network interception active: blocking images, media, and fonts.")
+
+        await page.goto("https://gemini.google.com/")
+        logging.info("Gemini loaded successfully on new page.")
+        return page
+
+    async def start_new_chat(self, page: Page):
         """
         Attempts to click the 'New Chat' button using user-facing locators.
         """
         try:
             # More robust locator strategy using ARIA roles and labels
-            new_chat_button = self.page.locator("button, a").filter(has_text="New chat").first
+            new_chat_button = page.locator("button, a").filter(has_text="New chat").first
             # Fallback to aria-label if text isn't explicitly 'New chat'
             if not await new_chat_button.is_visible():
-                new_chat_button = self.page.get_by_label("New chat")
+                new_chat_button = page.get_by_label("New chat")
 
             await new_chat_button.click()
             logging.info("Clicked 'New Chat' button.")
             # Wait for network idle to ensure UI resets
-            await self.page.wait_for_load_state("networkidle", timeout=5000)
+            await page.wait_for_load_state("networkidle", timeout=5000)
 
         except Exception as e:
             logging.error(f"Error starting new chat (it might not be visible): {e}")
 
-    async def send_prompt(self, prompt_text: str):
+    async def send_prompt(self, page: Page, prompt_text: str):
         """
         Locates the chat input box, enters the prompt, and clicks the send button.
         """
         try:
             # Find the main input area using a robust locator
-            input_box = self.page.locator("div[role='textbox'], div[contenteditable='true']").first
+            input_box = page.locator("div[role='textbox']").first
             await input_box.wait_for(state="visible", timeout=15000)
 
             await input_box.fill(prompt_text)
             logging.info("Entered prompt text.")
 
             # Wait a brief moment for the send button to become active after typing
-            await self.page.wait_for_timeout(500)
+            await page.wait_for_timeout(500)
 
             # Find and click the send button
-            send_button = self.page.locator("button[aria-label*='Send'], button:has-text('Send')").first
+            send_button = page.get_by_role("button", name="Send").first
             await send_button.click()
             logging.info("Clicked 'Send' button.")
 
@@ -113,7 +115,7 @@ class GeminiBot:
             logging.error(f"{error_msg} - Details: {e}")
             raise Exception(error_msg)
 
-    async def wait_for_response(self, timeout=300000, poll_callback=None):
+    async def wait_for_response(self, page: Page, timeout=300000, poll_callback=None):
         """
         Waits for the AI to finish generating the response.
         Polls the DOM for pseudo-streaming updates if poll_callback is provided.
@@ -121,10 +123,10 @@ class GeminiBot:
         logging.info("Waiting for Gemini response...")
         try:
             # Wait a moment for generation to actually start
-            await self.page.wait_for_timeout(3000)
+            await page.wait_for_timeout(3000)
 
             # Wait for the send button to become interactable again.
-            send_button = self.page.locator("button[aria-label*='Send'], button:has-text('Send')").first
+            send_button = page.get_by_role("button", name="Send").first
 
             # If a callback is provided, we poll while waiting for the send button
             if poll_callback:
@@ -136,7 +138,7 @@ class GeminiBot:
 
                     try:
                         # Attempt to extract partial text
-                        partial_text = await self.get_last_response()
+                        partial_text = await self.get_last_response(page)
                         if partial_text:
                             await poll_callback(partial_text)
                     except Exception as poll_e:
@@ -153,44 +155,30 @@ class GeminiBot:
                 await send_button.wait_for(state="visible", timeout=timeout)
 
             # Add a small buffer for DOM finalization
-            await self.page.wait_for_timeout(2000)
+            await page.wait_for_timeout(2000)
             logging.info("Response generation appears complete.")
             return True
 
         except Exception as e:
             raise Exception(f"Timeout: Gemini did not finish responding within {timeout/1000} seconds. Error: {e}")
 
-    async def get_last_response(self) -> str:
+    async def get_last_response(self, page: Page) -> str:
         """
         Extracts the generated response text from the DOM.
         """
         try:
             # Locate all response message containers
-            response_containers = self.page.locator("message-content, div.message-content, div.model-response-text")
+            response_containers = page.locator('[data-testid="model-response-content"]')
             count = await response_containers.count()
 
             if count > 0:
                 last_response = response_containers.nth(count - 1)
-
-                # Try to extract text from paragraphs for cleaner output
-                paragraphs = last_response.locator("p")
-                p_count = await paragraphs.count()
-
-                if p_count > 0:
-                    text_parts = []
-                    for i in range(p_count):
-                        text = await paragraphs.nth(i).inner_text()
-                        if text.strip():
-                            text_parts.append(text)
-                    logging.info("Extracted response using heuristic paragraph parsing.")
-                    return "\n\n".join(text_parts)
-                else:
-                    # Fallback to raw text
-                    logging.info("Extracted response using raw text from response element.")
-                    return await last_response.inner_text()
+                # Fallback to raw text
+                logging.info("Extracted response using inner_text from response element.")
+                return await last_response.inner_text()
             else:
                  logging.warning("Could not find specific response elements. Falling back to page body extraction.")
-                 body_text = await self.page.inner_text("body")
+                 body_text = await page.inner_text("body")
                  return body_text[-2000:]
 
         except Exception as e:
