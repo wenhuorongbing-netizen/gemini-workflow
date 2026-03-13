@@ -367,7 +367,9 @@ async def index(request: Request):
 
 import uuid
 
-async def run_workflow_engine(steps, workspace_id, stream_queue=None, profile_id="1"):
+async def run_workflow_engine(steps, workspace_id, stream_queue=None, profile_id="1", run_variables=None):
+    if run_variables is None:
+        run_variables = {}
     run_id = str(uuid.uuid4())
     page = None
     try:
@@ -401,6 +403,12 @@ async def run_workflow_engine(steps, workspace_id, stream_queue=None, profile_id
                 g_tag = f"{{{{GLOBAL_{g_key}}}}}"
                 if g_tag in prompt_template:
                     prompt_template = prompt_template.replace(g_tag, g_val)
+
+            # Runtime variable injection
+            for rv_key, rv_val in run_variables.items():
+                rv_tag = f"{{{{RUN_VAR_{rv_key}}}}}"
+                if rv_tag in prompt_template:
+                    prompt_template = prompt_template.replace(rv_tag, str(rv_val))
 
             logging.info(f"Executing Step {step_id} (Type: {step_type})")
             if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Starting', 'message': f'Executing Step {step_id}...'})}\n\n"
@@ -1010,6 +1018,7 @@ async def execute_workflow(request: Request):
     steps = data.get('steps', [])
     workspace_id = data.get('workspace_id')
     profile_id = data.get('profile_id', '1')
+    run_variables = data.get('run_variables', {})
 
     if not steps:
         return StreamingResponse(error_stream("No steps provided in workflow."), media_type="text/event-stream")
@@ -1028,7 +1037,7 @@ async def execute_workflow(request: Request):
 
     async def sse_wrapper():
         try:
-            async for event in run_workflow_engine(steps, workspace_id, stream_queue, profile_id):
+            async for event in run_workflow_engine(steps, workspace_id, stream_queue, profile_id, run_variables):
                 yield event
         finally:
             bot_semaphore.release()

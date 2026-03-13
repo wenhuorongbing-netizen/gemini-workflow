@@ -271,6 +271,21 @@
         </div>
     </div>
 
+    <!-- Run Modal -->
+    <div id="run-modal" class="modal">
+        <div class="modal-content" style="width: 600px; box-shadow: 0 10px 30px rgba(0,0,0,0.3); border-radius: 8px;">
+            <h3 style="margin-top: 0; color: #3498db; border-bottom: 2px solid #ecf0f1; padding-bottom: 10px;">Configure Workflow Run</h3>
+            <p style="font-size: 0.85em; color: #7f8c8d; text-align: left;">Please provide values for the runtime variables detected in your workflow steps. You can paste text or load from a local file.</p>
+            <div id="run-modal-vars" style="max-height: 400px; overflow-y: auto; padding: 10px; margin-bottom: 20px; border: 1px solid #eaeaea; border-radius: 6px; background: #fcfcfc;">
+                <!-- Dynamically populated by executeWorkflow -->
+            </div>
+            <div style="display: flex; justify-content: flex-end; gap: 10px;">
+                <button class="btn" style="background-color: #95a5a6; color: white; padding: 8px 15px;" onclick="document.getElementById('run-modal').style.display = 'none'">Cancel</button>
+                <button class="btn btn-run" style="padding: 8px 15px;" onclick="confirmRunModal()">Confirm & Run</button>
+            </div>
+        </div>
+    </div>
+
     <!-- Edit Prompt Modal -->
         <div class="modal-content">
             <h3>Edit Prompt Name</h3>
@@ -1315,6 +1330,69 @@
 
             const profileId = document.getElementById('profile-selector').value;
 
+            // Check for RUN_VAR_xxx in prompts
+            const runVarRegex = /\{\{RUN_VAR_([A-Za-z0-9_]+)\}\}/g;
+            const uniqueRunVars = new Set();
+            steps.forEach(s => {
+                let match;
+                while ((match = runVarRegex.exec(s.prompt)) !== null) {
+                    uniqueRunVars.add(match[1]);
+                }
+            });
+
+            if (uniqueRunVars.size > 0) {
+                // Show Run Modal
+                window.pendingSteps = steps;
+                window.pendingProfileId = profileId;
+                const container = document.getElementById('run-modal-vars');
+                container.innerHTML = '';
+                uniqueRunVars.forEach(varName => {
+                    container.innerHTML += `
+                        <div style="margin-bottom: 15px; text-align: left;">
+                            <label style="font-weight: bold; color: #2c3e50; font-size: 0.9em;">${varName}</label>
+                            <button onclick="document.getElementById('file-runvar-${varName}').click()" style="margin-left: 10px; font-size: 0.8em; padding: 2px 8px; border-radius: 4px; border: 1px solid #ccc; background: #ecf0f1; cursor: pointer;">📎 Load from .txt/.md</button>
+                            <input type="file" id="file-runvar-${varName}" accept=".txt,.md" style="display: none;" onchange="handleFileUpload(event, '${varName}')" />
+                            <textarea id="runvar-${varName}" style="width: 100%; height: 80px; margin-top: 5px; border-radius: 4px; border: 1px solid #ccc; padding: 5px;" placeholder="Enter value for {% raw %}{{RUN_VAR_${varName}}}{% endraw %}..."></textarea>
+                        </div>
+                    `;
+                });
+                document.getElementById('run-modal').style.display = 'block';
+                return;
+            }
+
+            // If no RUN_VARs, execute immediately
+            submitWorkflowExecution(steps, profileId);
+        }
+
+        function handleFileUpload(event, varName) {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                const textarea = document.getElementById(`runvar-${varName}`);
+                if (textarea) {
+                    textarea.value = e.target.result;
+                }
+            };
+            reader.readAsText(file);
+        }
+
+        function confirmRunModal() {
+            const container = document.getElementById('run-modal-vars');
+            const textareas = container.querySelectorAll('textarea');
+            const runVariables = {};
+
+            textareas.forEach(ta => {
+                const varName = ta.id.replace('runvar-', '');
+                runVariables[varName] = ta.value;
+            });
+
+            document.getElementById('run-modal').style.display = 'none';
+            submitWorkflowExecution(window.pendingSteps, window.pendingProfileId, runVariables);
+        }
+
+        async function submitWorkflowExecution(steps, profileId, runVariables = {}) {
             const runBtn = document.getElementById('run-btn');
             const stopBtn = document.getElementById('stop-btn');
             const statusBar = document.getElementById('status-bar');
@@ -1336,7 +1414,7 @@
                 const response = await fetch('/execute', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ steps, workspace_id: currentWorkspaceId, profile_id: profileId })
+                    body: JSON.stringify({ steps, workspace_id: currentWorkspaceId, profile_id: profileId, run_variables: runVariables })
                 });
 
                 const reader = response.body.getReader();

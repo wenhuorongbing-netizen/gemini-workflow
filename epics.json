@@ -4,7 +4,7 @@
     "watch_folder": "./watch_test_folder",
     "steps": [
       {
-        "prompt": "test prompt",
+        "prompt": "Summarize this: {{RUN_VAR_TRANSCRIPT}}",
         "new_chat": false,
         "type": "standard",
         "chat_url": "",
