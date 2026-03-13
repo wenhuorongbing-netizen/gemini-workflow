@@ -118,7 +118,7 @@
         });
 
         // --- UI Interactions ---
-        function addStep(promptText = '', isNewChat = false) {
+        function addStep(promptText = '', isNewChat = false, stepType = 'standard') {
             stepCount++;
             const stepId = stepCount;
             const container = document.getElementById('workflow-steps');
@@ -128,6 +128,20 @@
             stepDiv.id = `step-${stepId}`;
 
             let toolbarHtml = '';
+
+            // Check if any previous step is a batch step to inject {{CURRENT_ITEM}} button
+            let hasBatchBefore = false;
+            for (let i = 1; i < stepId; i++) {
+                const prevTypeSel = document.getElementById(`steptype-${i}`);
+                if (prevTypeSel && prevTypeSel.value === 'batch') {
+                    hasBatchBefore = true;
+                    break;
+                }
+            }
+            if (hasBatchBefore) {
+                toolbarHtml += '<button onclick="insertCurrentItem(' + stepId + ')">+ {% raw %}{{CURRENT_ITEM}}{% endraw %}</button>';
+            }
+
             for (let i = 1; i < stepId; i++) {
                 toolbarHtml += '<button onclick="insertVariable(' + stepId + ', ' + i + ')">+ {% raw %}{{OUTPUT_{% endraw %}' + i + '{% raw %}}}{% endraw %}</button>';
             }
@@ -135,6 +149,10 @@
             stepDiv.innerHTML = `
                 <div class="step-header">
                     <span class="step-title">Step ${stepId}</span>
+                    <select class="step-type-selector" id="steptype-${stepId}" onchange="toggleStepType(this, ${stepId})">
+                        <option value="standard" ${stepType === 'standard' ? 'selected' : ''}>Standard Prompt</option>
+                        <option value="batch" ${stepType === 'batch' ? 'selected' : ''}>Batch Data List</option>
+                    </select>
                     <div class="step-controls">
                         <button onclick="moveStepUp(${stepId})" title="Move Up">↑</button>
                         <button onclick="moveStepDown(${stepId})" title="Move Down">↓</button>
@@ -144,8 +162,8 @@
                 <div class="toolbar" id="toolbar-${stepId}">
                     ${toolbarHtml ? '<span>Insert Context: </span>' + toolbarHtml : '<span style="color:#7f8c8d; font-size:0.85em;">No previous context available.</span>'}
                 </div>
-                <textarea id="prompt-${stepId}" placeholder="Enter prompt for Step ${stepId}..." oninput="this.style.height='auto'; this.style.height=(this.scrollHeight)+'px'; saveDraft()">${promptText}</textarea>
-                <div class="options">
+                <textarea id="prompt-${stepId}" placeholder="${stepType === 'batch' ? 'Enter a list of items, one per line...' : 'Enter prompt for Step ' + stepId + '...'}" oninput="this.style.height='auto'; this.style.height=(this.scrollHeight)+'px'; saveDraft()">${promptText}</textarea>
+                <div class="options" id="options-${stepId}" style="display: ${stepType === 'batch' ? 'none' : 'flex'};">
                     <input type="checkbox" id="newchat-${stepId}" onchange="saveDraft()" ${isNewChat ? 'checked' : ''}>
                     <label for="newchat-${stepId}">Start New Chat for this step</label>
                 </div>
@@ -202,6 +220,10 @@
                 step.id = `step-${newId}`;
                 step.querySelector('.step-title').innerText = `Step ${newId}`;
 
+                const typeSelector = step.querySelector('.step-type-selector');
+                typeSelector.id = `steptype-${newId}`;
+                typeSelector.setAttribute('onchange', `toggleStepType(this, ${newId})`);
+
                 const controls = step.querySelector('.step-controls');
                 controls.innerHTML = `
                     <button onclick="moveStepUp(${newId})" title="Move Up">↑</button>
@@ -211,7 +233,14 @@
 
                 const textarea = step.querySelector('textarea');
                 textarea.id = `prompt-${newId}`;
-                textarea.placeholder = `Enter prompt for Step ${newId}...`;
+                if (typeSelector.value === 'batch') {
+                    textarea.placeholder = `Enter a list of items, one per line...`;
+                } else {
+                    textarea.placeholder = `Enter prompt for Step ${newId}...`;
+                }
+
+                const optionsDiv = step.querySelector('.options');
+                optionsDiv.id = `options-${newId}`;
 
                 const checkbox = step.querySelector('input[type="checkbox"]');
                 checkbox.id = `newchat-${newId}`;
@@ -230,6 +259,19 @@
                 const toolbar = document.getElementById(`toolbar-${i}`);
                 if (toolbar) {
                     let html = '';
+
+                    let hasBatchBefore = false;
+                    for (let j = 1; j < i; j++) {
+                        const prevTypeSel = document.getElementById(`steptype-${j}`);
+                        if (prevTypeSel && prevTypeSel.value === 'batch') {
+                            hasBatchBefore = true;
+                            break;
+                        }
+                    }
+                    if (hasBatchBefore) {
+                        html += '<button onclick="insertCurrentItem(' + i + ')">+ {% raw %}{{CURRENT_ITEM}}{% endraw %}</button>';
+                    }
+
                     for (let j = 1; j < i; j++) {
                         html += '<button onclick="insertVariable(' + i + ', ' + j + ')">+ {% raw %}{{OUTPUT_{% endraw %}' + j + '{% raw %}}}{% endraw %}</button>';
                     }
@@ -238,9 +280,40 @@
             }
         }
 
+        function toggleStepType(selectElem, stepId) {
+            const textarea = document.getElementById(`prompt-${stepId}`);
+            const optionsDiv = document.getElementById(`options-${stepId}`);
+            if (selectElem.value === 'batch') {
+                textarea.placeholder = "Enter a list of items, one per line...";
+                optionsDiv.style.display = 'none';
+            } else {
+                textarea.placeholder = "Enter prompt for Step " + stepId + "...";
+                optionsDiv.style.display = 'flex';
+            }
+            saveDraft();
+            updateToolbars();
+        }
+
         function insertVariable(stepId, varId) {
             const textarea = document.getElementById(`prompt-${stepId}`);
             const textToInsert = '{% raw %}{{OUTPUT_{% endraw %}' + varId + '{% raw %}}}{% endraw %}';
+
+            const startPos = textarea.selectionStart;
+            const endPos = textarea.selectionEnd;
+
+            textarea.value = textarea.value.substring(0, startPos)
+                + textToInsert
+                + textarea.value.substring(endPos, textarea.value.length);
+
+            textarea.selectionStart = startPos + textToInsert.length;
+            textarea.selectionEnd = startPos + textToInsert.length;
+            textarea.focus();
+            saveDraft();
+        }
+
+        function insertCurrentItem(stepId) {
+            const textarea = document.getElementById(`prompt-${stepId}`);
+            const textToInsert = '{% raw %}{{CURRENT_ITEM}}{% endraw %}';
 
             const startPos = textarea.selectionStart;
             const endPos = textarea.selectionEnd;
@@ -261,7 +334,8 @@
             for (let i = 1; i <= stepCount; i++) {
                 const prompt = document.getElementById(`prompt-${i}`).value;
                 const newChat = document.getElementById(`newchat-${i}`).checked;
-                steps.push({ prompt, new_chat: newChat });
+                const stepType = document.getElementById(`steptype-${i}`).value;
+                steps.push({ prompt, new_chat: newChat, type: stepType });
             }
             localStorage.setItem('geminiDraft', JSON.stringify(steps));
         }
@@ -269,7 +343,7 @@
         function loadDraft() {
             const draft = JSON.parse(localStorage.getItem('geminiDraft'));
             if (draft && draft.length > 0) {
-                draft.forEach(step => addStep(step.prompt, step.new_chat));
+                draft.forEach(step => addStep(step.prompt, step.new_chat, step.type || 'standard'));
             } else {
                 addStep();
             }
@@ -350,7 +424,8 @@
                 if (!promptElem) continue;
                 const prompt = promptElem.value;
                 const newChat = document.getElementById(`newchat-${i}`).checked;
-                steps.push({ prompt, new_chat: newChat });
+                const stepType = document.getElementById(`steptype-${i}`).value;
+                steps.push({ prompt, new_chat: newChat, type: stepType });
             }
             if (steps.length === 0) return alert("Nothing to export!");
 
@@ -381,7 +456,7 @@
                         stepCount = 0;
 
                         // Reconstruct steps
-                        steps.forEach(step => addStep(step.prompt, step.new_chat));
+                        steps.forEach(step => addStep(step.prompt, step.new_chat, step.type || 'standard'));
                         saveDraft();
 
                         // Reset file input
@@ -420,12 +495,13 @@
             for (let i = 1; i <= stepCount; i++) {
                 const prompt = document.getElementById(`prompt-${i}`).value.trim();
                 const newChat = document.getElementById(`newchat-${i}`).checked;
+                const stepType = document.getElementById(`steptype-${i}`).value;
 
                 if (!prompt) {
                     alert(`Step ${i} cannot be empty.`);
                     return;
                 }
-                steps.push({ prompt, new_chat: newChat });
+                steps.push({ prompt, new_chat: newChat, type: stepType });
             }
 
             if (steps.length === 0) return alert("Please add at least one step.");
