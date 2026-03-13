@@ -8,11 +8,38 @@ import json
 import os
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 
 app = FastAPI()
+scheduler = AsyncIOScheduler()
 
 EPICS_FILE = 'epics.json'
+GLOBALS_FILE = 'globals.json'
 HEADLESS_MODE = False
+
+def load_globals():
+    if os.path.exists(GLOBALS_FILE):
+        try:
+            with open(GLOBALS_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except:
+            return {}
+    return {}
+
+def save_globals(data):
+    with open(GLOBALS_FILE, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+@app.get("/api/globals")
+async def get_global_vars():
+    return JSONResponse(load_globals())
+
+@app.post("/api/globals")
+async def save_global_vars(request: Request):
+    data = await request.json()
+    save_globals(data)
+    return JSONResponse({"status": "success"})
 
 @app.post("/api/settings/headless")
 async def toggle_headless(request: Request):
@@ -61,6 +88,19 @@ bot_semaphore = None
 # Global event to signal emergency stop
 cancel_event = None
 
+# Global store for approval nodes
+approval_events = {}
+
+@app.post("/api/approve/{run_id}")
+async def approve_step(run_id: str, request: Request):
+    data = await request.json()
+    if run_id in approval_events:
+        approval_events[run_id]['text'] = data.get('text', '')
+        approval_events[run_id]['action'] = data.get('action', 'approve')
+        approval_events[run_id]['event'].set()
+        return JSONResponse({"status": "success"})
+    raise HTTPException(status_code=404, detail="Run ID not waiting for approval")
+
 class WorkspaceFileHandler(FileSystemEventHandler):
     def __init__(self, workspace_id, steps, loop):
         self.workspace_id = workspace_id
@@ -74,24 +114,49 @@ class WorkspaceFileHandler(FileSystemEventHandler):
 
     async def trigger_workflow(self, filepath):
         try:
-            with open(filepath, 'r', encoding='utf-8') as f:
-                content = f.read()
-
-            if not content.strip():
+            if bot_semaphore.locked():
+                logging.warning(f"Skipping auto-trigger for {filepath} - server busy.")
                 return
 
-            steps_copy = json.loads(json.dumps(self.steps))
-            if steps_copy:
-                steps_copy[0]['prompt'] = f"{content}\n\n---\n\n" + steps_copy[0].get('prompt', '')
+            await asyncio.wait_for(bot_semaphore.acquire(), timeout=0.1)
+            try:
+                with open(filepath, 'r', encoding='utf-8') as f:
+                    content = f.read()
 
-            # Run silently in background
-            async for _ in run_workflow_engine(steps_copy, self.workspace_id, None):
-                pass
+                if not content.strip():
+                    return
+
+                steps_copy = json.loads(json.dumps(self.steps))
+                if steps_copy:
+                    steps_copy[0]['prompt'] = f"{content}\n\n---\n\n" + steps_copy[0].get('prompt', '')
+
+                # Run silently in background
+                async for _ in run_workflow_engine(steps_copy, self.workspace_id, None):
+                    pass
+            finally:
+                bot_semaphore.release()
 
         except Exception as e:
             logging.error(f"Auto-trigger failed for file {filepath}: {e}")
 
 file_observer = None
+
+async def execute_cron_job(workspace_id, steps):
+    logging.info(f"Executing scheduled cron job for workspace {workspace_id}")
+    try:
+        if bot_semaphore.locked():
+            logging.warning(f"Skipping cron job for {workspace_id} - server busy.")
+            return
+
+        await asyncio.wait_for(bot_semaphore.acquire(), timeout=0.1)
+        try:
+            steps_copy = json.loads(json.dumps(steps))
+            async for _ in run_workflow_engine(steps_copy, workspace_id, None):
+                pass
+        finally:
+            bot_semaphore.release()
+    except Exception as e:
+        logging.error(f"Cron execution failed for workspace {workspace_id}: {e}")
 
 def setup_watchers(loop=None):
     global file_observer
@@ -109,15 +174,29 @@ def setup_watchers(loop=None):
         threading.Thread(target=lambda: old_observer.join()).start()
 
     file_observer = Observer()
+
+    # Also update the scheduler
+    scheduler.remove_all_jobs()
+
     epics = load_epics()
 
     for ws_id, data in epics.items():
-        watch_folder = data.get('watch_folder')
         steps = data.get('steps', [])
+
+        watch_folder = data.get('watch_folder')
         if watch_folder and os.path.isdir(watch_folder) and steps:
             handler = WorkspaceFileHandler(ws_id, steps, loop)
             file_observer.schedule(handler, watch_folder, recursive=False)
             logging.info(f"Watching folder {watch_folder} for workspace {ws_id}")
+
+        cron_schedule = data.get('cron_schedule')
+        if cron_schedule and steps:
+            try:
+                trigger = CronTrigger.from_crontab(cron_schedule)
+                scheduler.add_job(execute_cron_job, trigger, args=[ws_id, steps], id=f"cron_{ws_id}")
+                logging.info(f"Scheduled cron {cron_schedule} for workspace {ws_id}")
+            except ValueError as e:
+                logging.error(f"Invalid cron string '{cron_schedule}' for workspace {ws_id}: {e}")
 
     if file_observer.emitters:
         file_observer.start()
@@ -128,10 +207,12 @@ async def startup_event():
     global cancel_event
     bot_semaphore = asyncio.Semaphore(3)
     cancel_event = asyncio.Event()
+    scheduler.start()
     setup_watchers(asyncio.get_running_loop())
 
 @app.on_event("shutdown")
 async def shutdown_event():
+    scheduler.shutdown()
     if file_observer and file_observer.is_alive():
         file_observer.stop()
         file_observer.join()
@@ -188,9 +269,11 @@ async def save_workspace(workspace_id: str, request: Request):
         epics[workspace_id]["watch_folder"] = data["watch_folder"]
     if "webhook_url" in data:
         epics[workspace_id]["webhook_url"] = data["webhook_url"]
+    if "cron_schedule" in data:
+        epics[workspace_id]["cron_schedule"] = data["cron_schedule"]
 
     save_epics(epics)
-    setup_watchers() # Refresh watchers on save
+    setup_watchers() # Refresh watchers and schedulers on save
     return JSONResponse({"status": "success"})
 
 @app.delete("/api/workspaces/{workspace_id}")
@@ -205,7 +288,10 @@ async def delete_workspace(workspace_id: str):
 async def index(request: Request):
     return templates.TemplateResponse("index.html", {"request": request})
 
+import uuid
+
 async def run_workflow_engine(steps, workspace_id, stream_queue=None):
+    run_id = str(uuid.uuid4())
     page = None
     try:
         try:
@@ -217,7 +303,9 @@ async def run_workflow_engine(steps, workspace_id, stream_queue=None):
 
         results = {}
 
-        for index, step in enumerate(steps):
+        index = 0
+        while index < len(steps):
+            step = steps[index]
             if cancel_event and cancel_event.is_set():
                 if stream_queue: yield f"data: {json.dumps({'step': index + 1, 'status': 'Canceled', 'message': 'Workflow stopped by user.'})}\n\n"
                 break
@@ -229,8 +317,54 @@ async def run_workflow_engine(steps, workspace_id, stream_queue=None):
             chat_url = step.get('chat_url', '').strip()
             show_result = step.get('show_result', True)
 
-            logging.info(f"Executing Step {step_id}")
+            # Global variable injection
+            global_vars = load_globals()
+            for g_key, g_val in global_vars.items():
+                g_tag = f"{{{{GLOBAL_{g_key}}}}}"
+                if g_tag in prompt_template:
+                    prompt_template = prompt_template.replace(g_tag, g_val)
+
+            logging.info(f"Executing Step {step_id} (Type: {step_type})")
             if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Starting', 'message': f'Executing Step {step_id}...'})}\n\n"
+
+            if step_type == 'approval':
+                prev_result = results.get(str(step_id - 1), "")
+
+                approval_events[run_id] = {
+                    'event': asyncio.Event(),
+                    'text': None,
+                    'action': None
+                }
+
+                if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Awaiting_Approval', 'run_id': run_id, 'result': prev_result, 'message': 'Waiting for user approval...'})}\n\n"
+
+                # Wait for user input or cancel event
+                while not approval_events[run_id]['event'].is_set():
+                    if cancel_event and cancel_event.is_set():
+                        break
+                    try:
+                        await asyncio.wait_for(asyncio.sleep(0.5), timeout=0.5)
+                    except asyncio.TimeoutError:
+                        pass
+
+                if cancel_event and cancel_event.is_set():
+                    del approval_events[run_id]
+                    if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Canceled', 'message': 'Workflow stopped by user.'})}\n\n"
+                    break
+
+                action = approval_events[run_id]['action']
+                edited_text = approval_events[run_id]['text']
+                del approval_events[run_id]
+
+                if action == 'reject':
+                    results[str(step_id)] = "[REJECTED] Workflow stopped by user at Approval Node."
+                    if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Error', 'result': results[str(step_id)]})}\n\n"
+                    break
+                else:
+                    results[str(step_id)] = edited_text
+                    if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Complete', 'result': edited_text, 'show_result': show_result})}\n\n"
+                    index += 1
+                    continue
 
             # Auto-chunking for huge inputs
             is_chunked = False
@@ -245,6 +379,93 @@ async def run_workflow_engine(steps, workspace_id, stream_queue=None):
                 # Batch Input Step
                 results[str(step_id)] = prompt_template
                 if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Complete', 'result': prompt_template, 'show_result': show_result})}\n\n"
+                index += 1
+                continue
+
+            elif step_type == 'scraper':
+                # Web Scraper Node
+                url_to_scrape = prompt_template.strip()
+                if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Scraping', 'message': f'Scraping URL: {url_to_scrape}'})}\n\n"
+                try:
+                    scraped_text = await current_bot.scrape_url(page, url_to_scrape)
+                    results[str(step_id)] = scraped_text
+                    if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Complete', 'result': scraped_text, 'show_result': show_result})}\n\n"
+                except Exception as e:
+                    results[str(step_id)] = f"[SCRAPE FAILED] {str(e)}"
+                    if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Error', 'result': results[str(step_id)]})}\n\n"
+                index += 1
+                continue
+
+            elif step_type == 'logic':
+                # Evaluate logic gate
+                import re
+                try:
+                    # Very simple parsing: IF {{OUTPUT_X}} CONTAINS "str" THEN GOTO STEP Y
+                    match = re.search(r'IF\s+(.*?)\s+(CONTAINS|EQUALS|NOT CONTAINS)\s+"(.*?)"\s+THEN\s+GOTO\s+STEP\s+(\d+)', prompt_template, re.IGNORECASE)
+                    if match:
+                        var_raw, op, val, target_step_str = match.groups()
+
+                        # Resolve variable
+                        var_val = var_raw
+                        for past_id, past_output in results.items():
+                            tag = f"{{{{OUTPUT_{past_id}}}}}"
+                            if tag in var_val:
+                                var_val = var_val.replace(tag, past_output)
+
+                        condition_met = False
+                        op = op.upper()
+                        if op == 'CONTAINS':
+                            condition_met = val in var_val
+                        elif op == 'NOT CONTAINS':
+                            condition_met = val not in var_val
+                        elif op == 'EQUALS':
+                            condition_met = val == var_val
+
+                        target_step = int(target_step_str)
+                        if condition_met:
+                            if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Logic Evaluated', 'message': f'Condition met. Jumping to Step {target_step}.'})}\n\n"
+                            results[str(step_id)] = f"Logic Gate evaluated to True. Jumped to Step {target_step}."
+                            index = target_step - 1
+                            continue
+                        else:
+                            if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Logic Evaluated', 'message': 'Condition not met. Continuing...'})}\n\n"
+                            results[str(step_id)] = "Logic Gate evaluated to False. Continued."
+                    else:
+                        if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Error', 'message': 'Invalid Logic Gate syntax'})}\n\n"
+                        results[str(step_id)] = "[FAILED] Invalid Logic Gate syntax"
+                except Exception as e:
+                    if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Error', 'message': str(e)})}\n\n"
+                    results[str(step_id)] = f"[FAILED] {e}"
+
+                if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Complete', 'result': results[str(step_id)], 'show_result': show_result})}\n\n"
+                index += 1
+                continue
+
+            elif step_type == 'python':
+                # Execute Python Script
+                if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Executing Python', 'message': 'Running custom Python logic...'})}\n\n"
+
+                # Resolve variables first
+                final_script = prompt_template
+                for past_id, past_output in results.items():
+                    tag = f"{{{{OUTPUT_{past_id}}}}}"
+                    if tag in final_script:
+                        final_script = final_script.replace(tag, past_output)
+
+                prev_input = results.get(str(step_id - 1), "")
+
+                local_vars = {'input': prev_input, 'output': ''}
+                try:
+                    # Caution: Exec is dangerous in generic web apps, but for local-first assistant tools it provides extreme power.
+                    exec(final_script, {}, local_vars)
+                    py_output = local_vars.get('output', '')
+                    results[str(step_id)] = str(py_output)
+                    if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Complete', 'result': results[str(step_id)], 'show_result': show_result})}\n\n"
+                except Exception as e:
+                    results[str(step_id)] = f"[PYTHON ERROR] {str(e)}"
+                    if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Error', 'result': results[str(step_id)]})}\n\n"
+
+                index += 1
                 continue
 
             elif '{{CURRENT_ITEM}}' in prompt_template:
@@ -565,6 +786,8 @@ async def run_workflow_engine(steps, workspace_id, stream_queue=None):
             if not step_success:
                 # If a critical error occurs and all retries fail, break the workflow to avoid cascaded failures
                 break
+
+            index += 1
 
 
         # Save results to the workspace if provided

@@ -102,9 +102,11 @@
         <!-- New Workspaces Sidebar -->
         <div class="workspace-sidebar">
             <h3>Workspaces <button onclick="createWorkspace()" style="background:none; border:none; color:white; cursor:pointer; font-size:1.2em;" title="New Workspace">+</button></h3>
-            <div id="workspace-list">
+            <div id="workspace-list" style="margin-bottom: 20px;">
                 <!-- Workspace items will be injected here -->
             </div>
+
+            <button class="btn" style="width: 100%; background-color: #8e44ad; color: white; margin-top: auto;" onclick="openGlobalsModal()">🔒 Global Vault</button>
         </div>
 
         <div class="sidebar">
@@ -142,7 +144,8 @@
 
                 <div id="results-container" class="results">
                     <div class="result-tabs">
-                        <div class="result-tab active" onclick="switchResultTab('final', this)">Final View</div>
+                        <div class="result-tab active" onclick="switchResultTab('summary', this)">Summary Dashboard</div>
+                        <div class="result-tab" onclick="switchResultTab('final', this)">Final View</div>
                         <div class="result-tab" onclick="switchResultTab('technical', this)">Technical Log</div>
                     </div>
                     <div id="results-list"></div>
@@ -191,12 +194,31 @@
                 <label style="font-weight: bold; font-size: 0.9em;">Watch Folder Path (Auto-Trigger):</label><br>
                 <input type="text" id="settings-ws-watch" placeholder="/path/to/folder" style="width: 95%; margin-top: 5px;">
             </div>
+            <div style="text-align: left; margin-bottom: 10px;">
+                <label style="font-weight: bold; font-size: 0.9em;">Cron Schedule:</label><br>
+                <input type="text" id="settings-ws-cron" placeholder="e.g. 0 8 * * * (runs at 8:00 AM daily)" style="width: 95%; margin-top: 5px;">
+            </div>
             <div style="text-align: left; margin-bottom: 15px;">
                 <label style="font-weight: bold; font-size: 0.9em;">Auto-Export Webhook URL:</label><br>
                 <input type="text" id="settings-ws-webhook" placeholder="https://api.example.com/webhook" style="width: 95%; margin-top: 5px;">
             </div>
             <button class="btn btn-run" onclick="confirmSettingsWorkspace()">Save</button>
             <button class="btn" onclick="closeSettingsWsModal()">Cancel</button>
+        </div>
+    </div>
+
+    <!-- Global Vault Modal -->
+    <div id="globals-modal" class="modal">
+        <div class="modal-content" style="width: 500px;">
+            <h3>Global Variable Vault 🔒</h3>
+            <p style="font-size: 0.85em; color: #7f8c8d;">Define variables to use across all workspaces via <code>{% raw %}{{GLOBAL_KEY}}{% endraw %}</code>.</p>
+            <div id="globals-list" style="text-align: left; max-height: 300px; overflow-y: auto; margin-bottom: 15px;">
+                <!-- Globals injected here -->
+            </div>
+            <button class="btn btn-add" style="margin-bottom: 15px;" onclick="addGlobalField()">+ Add Variable</button>
+            <br>
+            <button class="btn btn-run" onclick="saveGlobals()">Save Vault</button>
+            <button class="btn" onclick="closeGlobalsModal()">Cancel</button>
         </div>
     </div>
 
@@ -208,6 +230,18 @@
             <input type="hidden" id="edit-prompt-id">
             <button class="btn btn-run" onclick="confirmEditPrompt()">Save</button>
             <button class="btn" onclick="closeModal()">Cancel</button>
+        </div>
+    </div>
+
+    <!-- Approval Node Modal -->
+    <div id="approval-modal" class="modal">
+        <div class="modal-content" style="width: 600px;">
+            <h3>Human-in-the-Loop Approval</h3>
+            <p>Review and edit the output from the previous step before continuing.</p>
+            <input type="hidden" id="approval-run-id">
+            <textarea id="approval-textarea" style="height: 300px; margin-bottom: 15px; width: 95%;"></textarea>
+            <button class="btn btn-run" onclick="submitApproval('approve')">Approve & Continue</button>
+            <button class="btn" style="background-color: #e74c3c; color: white;" onclick="submitApproval('reject')">Reject & Stop</button>
         </div>
     </div>
 
@@ -261,7 +295,7 @@
                     div.innerHTML = `
                         <div class="workspace-name" title="${ws.name}" onclick="switchWorkspace('${ws.id}')">${ws.name}</div>
                         <div class="workspace-actions">
-                            <span onclick="openSettingsWsModal('${ws.id}', '${ws.name.replace(/'/g, "\\'")}', '${ws.watch_folder ? ws.watch_folder.replace(/\\/g, "\\\\").replace(/'/g, "\\'") : ''}', '${ws.webhook_url || ''}')" title="Settings">⚙️</span>
+                            <span onclick="openSettingsWsModal('${ws.id}', '${ws.name.replace(/'/g, "\\'")}', '${ws.watch_folder ? ws.watch_folder.replace(/\\/g, "\\\\").replace(/'/g, "\\'") : ''}', '${ws.webhook_url || ''}', '${ws.cron_schedule || ''}')" title="Settings">⚙️</span>
                             <span onclick="openEditWsModal('${ws.id}', '${ws.name.replace(/'/g, "\\'")}')" title="Rename">✎</span>
                             <span onclick="deleteWorkspace('${ws.id}')" title="Delete" style="color:#e74c3c;">×</span>
                         </div>
@@ -344,10 +378,11 @@
             document.getElementById('edit-ws-modal').style.display = 'none';
         }
 
-        function openSettingsWsModal(id, name, watchFolder, webhookUrl) {
+        function openSettingsWsModal(id, name, watchFolder, webhookUrl, cronStr) {
             document.getElementById('settings-ws-id').value = id;
             document.getElementById('settings-ws-watch').value = watchFolder && watchFolder !== 'undefined' ? watchFolder : '';
             document.getElementById('settings-ws-webhook').value = webhookUrl && webhookUrl !== 'undefined' ? webhookUrl : '';
+            document.getElementById('settings-ws-cron').value = cronStr && cronStr !== 'undefined' ? cronStr : '';
             document.getElementById('settings-ws-modal').style.display = 'block';
         }
 
@@ -359,16 +394,72 @@
             const id = document.getElementById('settings-ws-id').value;
             const watch_folder = document.getElementById('settings-ws-watch').value;
             const webhook_url = document.getElementById('settings-ws-webhook').value;
+            const cron_schedule = document.getElementById('settings-ws-cron').value;
             try {
                 await fetch(`/api/workspaces/${id}`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ watch_folder, webhook_url })
+                    body: JSON.stringify({ watch_folder, webhook_url, cron_schedule })
                 });
                 loadWorkspaces();
                 closeSettingsWsModal();
             } catch (e) {
                 console.error("Error updating workspace settings", e);
+            }
+        }
+
+        // --- Global Vault Logic ---
+        async function openGlobalsModal() {
+            try {
+                const res = await fetch('/api/globals');
+                const data = await res.json();
+                const list = document.getElementById('globals-list');
+                list.innerHTML = '';
+                for (const [key, value] of Object.entries(data)) {
+                    addGlobalField(key, value);
+                }
+                document.getElementById('globals-modal').style.display = 'block';
+            } catch (e) {
+                console.error("Error loading globals", e);
+            }
+        }
+
+        function closeGlobalsModal() {
+            document.getElementById('globals-modal').style.display = 'none';
+        }
+
+        function addGlobalField(key = '', value = '') {
+            const list = document.getElementById('globals-list');
+            const div = document.createElement('div');
+            div.style.display = 'flex';
+            div.style.gap = '10px';
+            div.style.marginBottom = '10px';
+            div.innerHTML = `
+                <input type="text" placeholder="KEY_NAME" class="global-key" value="${key}" style="flex: 1;">
+                <input type="text" placeholder="Value" class="global-val" value="${value}" style="flex: 2;">
+                <button onclick="this.parentElement.remove()" style="color:#e74c3c; border:none; background:none; cursor:pointer;">×</button>
+            `;
+            list.appendChild(div);
+        }
+
+        async function saveGlobals() {
+            const keys = document.querySelectorAll('.global-key');
+            const vals = document.querySelectorAll('.global-val');
+            const data = {};
+            for (let i = 0; i < keys.length; i++) {
+                const k = keys[i].value.trim().toUpperCase();
+                const v = vals[i].value;
+                if (k) data[k] = v;
+            }
+            try {
+                await fetch('/api/globals', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(data)
+                });
+                closeGlobalsModal();
+            } catch (e) {
+                console.error("Error saving globals", e);
             }
         }
 
@@ -409,7 +500,7 @@
         }
 
         // --- UI Interactions ---
-        function addStep(promptText = '', isNewChat = false, stepType = 'standard', chatUrl = '', showResult = true, dashColumn = 'primary') {
+        function addStep(promptText = '', isNewChat = false, stepType = 'standard', chatUrl = '', showResult = true, dashColumn = 'primary', isImportant = false) {
             stepCount++;
             const stepId = stepCount;
             const container = document.getElementById('workflow-steps');
@@ -443,6 +534,10 @@
                     <select class="step-type-selector" id="steptype-${stepId}" onchange="toggleStepType(this, ${stepId})">
                         <option value="standard" ${stepType === 'standard' ? 'selected' : ''}>Standard Prompt</option>
                         <option value="batch" ${stepType === 'batch' ? 'selected' : ''}>Batch Data List</option>
+                        <option value="approval" ${stepType === 'approval' ? 'selected' : ''}>Approval Node</option>
+                        <option value="logic" ${stepType === 'logic' ? 'selected' : ''}>Logic Gate</option>
+                        <option value="python" ${stepType === 'python' ? 'selected' : ''}>Python Script</option>
+                        <option value="scraper" ${stepType === 'scraper' ? 'selected' : ''}>URL Scraper</option>
                     </select>
                     <select class="dash-col-selector" id="dashcol-${stepId}" onchange="saveDraft()" style="margin-left: 10px;">
                         <option value="primary" ${dashColumn === 'primary' ? 'selected' : ''}>Dashboard: Primary</option>
@@ -467,7 +562,9 @@
                 </div>
                 <div class="options" style="display: flex; align-items: center; margin-top: 5px;">
                     <input type="checkbox" id="show-result-${stepId}" onchange="saveDraft()" ${showResult ? 'checked' : ''}>
-                    <label for="show-result-${stepId}">Show in Final Result</label>
+                    <label for="show-result-${stepId}" style="margin-right: 15px;">Show in Final Result</label>
+                    <input type="checkbox" id="is-important-${stepId}" onchange="saveDraft()" ${isImportant ? 'checked' : ''}>
+                    <label for="is-important-${stepId}">⭐ Important</label>
                 </div>
             `;
 
@@ -562,6 +659,13 @@
                     showResultLabel.setAttribute('for', `show-result-${newId}`);
                 }
 
+                const isImportantCheckbox = step.querySelectorAll('input[type="checkbox"]')[2];
+                if (isImportantCheckbox) {
+                    isImportantCheckbox.id = `is-important-${newId}`;
+                    const isImportantLabel = step.querySelectorAll('label')[2];
+                    isImportantLabel.setAttribute('for', `is-important-${newId}`);
+                }
+
                 const dashColSelector = step.querySelector('.dash-col-selector');
                 if (dashColSelector) {
                     dashColSelector.id = `dashcol-${newId}`;
@@ -604,6 +708,18 @@
             const optionsDiv = document.getElementById(`options-${stepId}`);
             if (selectElem.value === 'batch') {
                 textarea.placeholder = "Enter a list of items, one per line...";
+                optionsDiv.style.display = 'none';
+            } else if (selectElem.value === 'approval') {
+                textarea.placeholder = "Approval notes (Optional). Execution pauses here until you review/edit the previous step's output.";
+                optionsDiv.style.display = 'none';
+            } else if (selectElem.value === 'logic') {
+                textarea.placeholder = 'e.g., IF {{OUTPUT_1}} CONTAINS "Urgent" THEN GOTO STEP 5';
+                optionsDiv.style.display = 'none';
+            } else if (selectElem.value === 'python') {
+                textarea.placeholder = 'Write Python code here. The previous step output is in the `input` string variable. Assign your result to the `output` variable.\n\ne.g., output = input.upper()';
+                optionsDiv.style.display = 'none';
+            } else if (selectElem.value === 'scraper') {
+                textarea.placeholder = 'Enter a URL to scrape... e.g., https://example.com/article';
                 optionsDiv.style.display = 'none';
             } else {
                 textarea.placeholder = "Enter prompt for Step " + stepId + "...";
@@ -881,6 +997,29 @@
             }
         }
 
+        // --- Approval Logic ---
+        function showApprovalModal(runId, text) {
+            document.getElementById('approval-run-id').value = runId;
+            document.getElementById('approval-textarea').value = text;
+            document.getElementById('approval-modal').style.display = 'block';
+        }
+
+        async function submitApproval(action) {
+            const runId = document.getElementById('approval-run-id').value;
+            const text = document.getElementById('approval-textarea').value;
+            document.getElementById('approval-modal').style.display = 'none';
+
+            try {
+                await fetch(`/api/approve/${runId}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ action, text })
+                });
+            } catch (e) {
+                console.error("Error submitting approval", e);
+            }
+        }
+
         // --- Execution (SSE stream parsing) ---
         async function executeWorkflow() {
             const steps = [];
@@ -976,6 +1115,9 @@
                                         statusBar.style.color = '#e67e22';
                                     } else if (data.status === 'Canceled') {
                                         statusBar.style.color = '#e74c3c';
+                                    } else if (data.status === 'Awaiting_Approval') {
+                                        statusBar.style.color = '#f39c12';
+                                        showApprovalModal(data.run_id, data.result || '');
                                     } else {
                                         statusBar.style.color = '#31708f';
                                     }

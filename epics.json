@@ -1,1 +1,74 @@
-{"test_epic": {"name": "Test Watch", "watch_folder": "./watch_test_folder", "steps": [{"prompt": "test prompt", "type": "standard"}]}}
+{
+  "test_epic": {
+    "name": "Test Watch",
+    "watch_folder": "./watch_test_folder",
+    "steps": [
+      {
+        "prompt": "test prompt",
+        "type": "standard"
+      }
+    ]
+  },
+  "1773379538628": {
+    "name": "Data Ingestion Workspace",
+    "steps": [
+      {
+        "prompt": "",
+        "new_chat": false,
+        "type": "scraper",
+        "chat_url": "",
+        "show_result": true,
+        "dash_column": "primary"
+      }
+    ],
+    "results": {}
+  },
+  "1773380304511": {
+    "name": "Advanced Node Test Workspace",
+    "steps": [
+      {
+        "prompt": "",
+        "new_chat": false,
+        "type": "standard",
+        "chat_url": "",
+        "show_result": true,
+        "dash_column": "primary"
+      }
+    ],
+    "results": {}
+  },
+  "1773380466966": {
+    "name": "Advanced Node Test Workspace",
+    "steps": [],
+    "results": {}
+  },
+  "1773380561598": {
+    "name": "Advanced Node Test Workspace",
+    "steps": [],
+    "results": {}
+  },
+  "1773380688655": {
+    "name": "Advanced Node Test Workspace",
+    "steps": [],
+    "results": {}
+  },
+  "1773380781421": {
+    "name": "Advanced Node Test Workspace",
+    "steps": [
+      {
+        "prompt": "",
+        "new_chat": false,
+        "type": "standard",
+        "chat_url": "",
+        "show_result": true,
+        "dash_column": "primary"
+      }
+    ],
+    "results": {}
+  },
+  "1773380876265": {
+    "name": "Advanced Node Test Workspace",
+    "steps": [],
+    "results": {}
+  }
+}

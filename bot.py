@@ -89,6 +89,30 @@ class GeminiBot:
         except Exception as e:
             logging.error(f"Error starting new chat (it might not be visible): {e}")
 
+    async def scrape_url(self, page: Page, url: str) -> str:
+        """
+        Navigates to a URL and extracts its main textual content.
+        """
+        try:
+            logging.info(f"Scraping URL: {url}")
+            await page.goto(url, wait_until="domcontentloaded")
+
+            # Try to grab the main article first for cleaner text, fallback to body
+            article = page.locator("article").first
+            if await article.is_visible():
+                return await article.inner_text()
+
+            body = page.locator("body")
+            if await body.is_visible():
+                return await body.inner_text()
+
+            return "No readable content found on this page."
+
+        except Exception as e:
+            error_msg = f"Failed to scrape URL {url}."
+            logging.error(f"{error_msg} - Details: {e}")
+            raise Exception(error_msg)
+
     async def goto_specific_chat(self, page: Page, url: str):
         """
         Navigates to a specific chat URL and waits for the input box to be visible.
