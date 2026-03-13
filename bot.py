@@ -90,6 +90,24 @@ class GeminiBot:
         except Exception as e:
             logging.error(f"Error starting new chat (it might not be visible): {e}")
 
+    async def goto_specific_chat(self, page: Page, url: str):
+        """
+        Navigates to a specific chat URL and waits for the input box to be visible.
+        """
+        try:
+            logging.info(f"Navigating to specific chat URL: {url}")
+            await page.goto(url)
+
+            # Wait for the chat to load completely by checking the input box
+            input_box = page.locator("div[role='textbox']").first
+            await input_box.wait_for(state="visible", timeout=20000)
+            logging.info("Specific chat loaded successfully.")
+
+        except Exception as e:
+            error_msg = f"Failed to load specific chat URL {url}. Ensure it is a valid Gemini chat."
+            logging.error(f"{error_msg} - Details: {e}")
+            raise Exception(error_msg)
+
     async def send_prompt(self, page: Page, prompt_text: str):
         """
         Locates the chat input box, enters the prompt, and clicks the send button.

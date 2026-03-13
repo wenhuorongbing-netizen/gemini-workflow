@@ -105,6 +105,7 @@ async def execute_workflow(request: Request):
                 prompt_template = step.get('prompt', '')
                 new_chat = step.get('new_chat', False)
                 step_type = step.get('type', 'standard')
+                chat_url = step.get('chat_url', '').strip()
 
                 logging.info(f"Executing Step {step_id}")
                 yield f"data: {json.dumps({'step': step_id, 'status': 'Starting', 'message': f'Executing Step {step_id}...'})}\n\n"
@@ -147,7 +148,11 @@ async def execute_workflow(request: Request):
                             MAX_RETRIES = 3
                             for attempt in range(MAX_RETRIES):
                                 try:
-                                    if new_chat:
+                                    if chat_url and chat_url.startswith('https://gemini.google.com/'):
+                                        # Instead of yield, we push to queue since this is an async function not generator
+                                        await stream_queue.put(f"__STATUS__:Navigating item {item_index + 1} to specific chat URL...")
+                                        await current_bot.goto_specific_chat(item_page, chat_url)
+                                    elif new_chat:
                                         await current_bot.start_new_chat(item_page)
 
                                     final_prompt = prompt_template.replace('{{CURRENT_ITEM}}', item)
@@ -174,15 +179,8 @@ async def execute_workflow(request: Request):
 
                                     while not wait_task.done():
                                         try:
-                                            partial_text = await asyncio.wait_for(stream_queue.get(), timeout=0.5)
-                                            # We are in an async def, so we can't yield to the main generator directly here.
-                                            # Instead, we just pass since the stream queue is global per workflow.
-                                            # However, to avoid a clogged queue or loss of data, let's put it into another structure if needed.
-                                            # Actually, since stream_queue is read by process_item, we should just let it be.
-                                            # Wait, if we don't yield here, the UI won't update for typing during batch.
-                                            # The easiest fix is to let `process_item` put updates into a shared `batch_queue`, and have the main loop read from it.
-                                            # For simplicity, we can just discard the typing info for batch mode or put a formatted string back into the stream_queue.
-                                            pass
+                                            # Wait in loop but we don't consume queue from here, the pump_queue will do it.
+                                            await asyncio.wait_for(asyncio.sleep(0.5), timeout=0.5)
                                         except asyncio.TimeoutError:
                                             if cancel_event and cancel_event.is_set():
                                                 wait_task.cancel()
@@ -243,7 +241,10 @@ async def execute_workflow(request: Request):
 
                     for attempt in range(MAX_RETRIES):
                         try:
-                            if new_chat:
+                            if chat_url and chat_url.startswith('https://gemini.google.com/'):
+                                yield f"data: {json.dumps({'step': step_id, 'status': 'Navigating', 'message': 'Navigating to specific chat URL...'})}\n\n"
+                                await current_bot.goto_specific_chat(page, chat_url)
+                            elif new_chat:
                                 yield f"data: {json.dumps({'step': step_id, 'status': 'New Chat', 'message': 'Starting new chat...'})}\n\n"
                                 await current_bot.start_new_chat(page)
 

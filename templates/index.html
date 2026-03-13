@@ -118,7 +118,7 @@
         });
 
         // --- UI Interactions ---
-        function addStep(promptText = '', isNewChat = false, stepType = 'standard') {
+        function addStep(promptText = '', isNewChat = false, stepType = 'standard', chatUrl = '') {
             stepCount++;
             const stepId = stepCount;
             const container = document.getElementById('workflow-steps');
@@ -163,9 +163,10 @@
                     ${toolbarHtml ? '<span>Insert Context: </span>' + toolbarHtml : '<span style="color:#7f8c8d; font-size:0.85em;">No previous context available.</span>'}
                 </div>
                 <textarea id="prompt-${stepId}" placeholder="${stepType === 'batch' ? 'Enter a list of items, one per line...' : 'Enter prompt for Step ' + stepId + '...'}" oninput="this.style.height='auto'; this.style.height=(this.scrollHeight)+'px'; saveDraft()">${promptText}</textarea>
-                <div class="options" id="options-${stepId}" style="display: ${stepType === 'batch' ? 'none' : 'flex'};">
+                <div class="options" id="options-${stepId}" style="display: ${stepType === 'batch' ? 'none' : 'flex'}; align-items: center;">
                     <input type="checkbox" id="newchat-${stepId}" onchange="saveDraft()" ${isNewChat ? 'checked' : ''}>
                     <label for="newchat-${stepId}">Start New Chat for this step</label>
+                    <input type="text" id="chaturl-${stepId}" class="chat-url-input" placeholder="Target Chat URL (Optional, e.g., https://gemini.google.com/app/...)" value="${chatUrl}" oninput="saveDraft()" style="margin-left: 15px; width: 300px; padding: 4px; border-radius: 4px; border: 1px solid #ccc;">
                 </div>
             `;
 
@@ -247,6 +248,11 @@
 
                 const label = step.querySelector('label');
                 label.setAttribute('for', `newchat-${newId}`);
+
+                const chatUrlInput = step.querySelector('.chat-url-input');
+                if (chatUrlInput) {
+                    chatUrlInput.id = `chaturl-${newId}`;
+                }
 
                 const toolbar = step.querySelector('.toolbar');
                 toolbar.id = `toolbar-${newId}`;
@@ -335,7 +341,8 @@
                 const prompt = document.getElementById(`prompt-${i}`).value;
                 const newChat = document.getElementById(`newchat-${i}`).checked;
                 const stepType = document.getElementById(`steptype-${i}`).value;
-                steps.push({ prompt, new_chat: newChat, type: stepType });
+                const chatUrl = document.getElementById(`chaturl-${i}`) ? document.getElementById(`chaturl-${i}`).value : '';
+                steps.push({ prompt, new_chat: newChat, type: stepType, chat_url: chatUrl });
             }
             localStorage.setItem('geminiDraft', JSON.stringify(steps));
         }
@@ -343,7 +350,7 @@
         function loadDraft() {
             const draft = JSON.parse(localStorage.getItem('geminiDraft'));
             if (draft && draft.length > 0) {
-                draft.forEach(step => addStep(step.prompt, step.new_chat, step.type || 'standard'));
+                draft.forEach(step => addStep(step.prompt, step.new_chat, step.type || 'standard', step.chat_url || ''));
             } else {
                 addStep();
             }
@@ -425,7 +432,8 @@
                 const prompt = promptElem.value;
                 const newChat = document.getElementById(`newchat-${i}`).checked;
                 const stepType = document.getElementById(`steptype-${i}`).value;
-                steps.push({ prompt, new_chat: newChat, type: stepType });
+                const chatUrl = document.getElementById(`chaturl-${i}`) ? document.getElementById(`chaturl-${i}`).value : '';
+                steps.push({ prompt, new_chat: newChat, type: stepType, chat_url: chatUrl });
             }
             if (steps.length === 0) return alert("Nothing to export!");
 
@@ -456,7 +464,7 @@
                         stepCount = 0;
 
                         // Reconstruct steps
-                        steps.forEach(step => addStep(step.prompt, step.new_chat, step.type || 'standard'));
+                        steps.forEach(step => addStep(step.prompt, step.new_chat, step.type || 'standard', step.chat_url || ''));
                         saveDraft();
 
                         // Reset file input
@@ -496,12 +504,13 @@
                 const prompt = document.getElementById(`prompt-${i}`).value.trim();
                 const newChat = document.getElementById(`newchat-${i}`).checked;
                 const stepType = document.getElementById(`steptype-${i}`).value;
+                const chatUrl = document.getElementById(`chaturl-${i}`) ? document.getElementById(`chaturl-${i}`).value.trim() : '';
 
                 if (!prompt) {
                     alert(`Step ${i} cannot be empty.`);
                     return;
                 }
-                steps.push({ prompt, new_chat: newChat, type: stepType });
+                steps.push({ prompt, new_chat: newChat, type: stepType, chat_url: chatUrl });
             }
 
             if (steps.length === 0) return alert("Please add at least one step.");
