@@ -979,7 +979,7 @@
                     if (keys.length > 0) {
                         html += '<div class="var-dropdown-header">Global Vault</div>';
                         for (const key of keys) {
-                            html += `<div class="var-dropdown-item" onclick="insertTag(${stepId}, '{% raw %}{{${key}}}{% endraw %}')"><span>{% raw %}{{${key}}}{% endraw %}</span> <span style="font-size: 0.8em; color: #95a5a6;">Global</span></div>`;
+                            html += `<div class="var-dropdown-item" onclick="insertTag(${stepId}, '{% raw %}{{GLOBAL_${key}}}{% endraw %}')"><span>{% raw %}{{GLOBAL_${key}}}{% endraw %}</span> <span style="font-size: 0.8em; color: #95a5a6;">Global</span></div>`;
                         }
                     }
                 }

@@ -1,6 +1,7 @@
 from fastapi import FastAPI, Request, BackgroundTasks, HTTPException
 from fastapi.templating import Jinja2Templates
 from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 import asyncio
 import logging
 from bot import GeminiBot
@@ -12,6 +13,15 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 scheduler = AsyncIOScheduler()
 
 import datetime
@@ -313,6 +323,7 @@ async def get_logs():
         return JSONResponse({"logs": f"Error reading logs: {str(e)}"})
 
 @app.get("/api/workspaces")
+@app.get("/api/epics")
 async def get_workspaces():
     epics = load_epics()
     # Return minimal info for sidebar
