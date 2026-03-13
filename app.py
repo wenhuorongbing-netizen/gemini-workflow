@@ -14,9 +14,61 @@ from apscheduler.triggers.cron import CronTrigger
 app = FastAPI()
 scheduler = AsyncIOScheduler()
 
+import datetime
+
 EPICS_FILE = 'epics.json'
 GLOBALS_FILE = 'globals.json'
+TEMPLATES_FILE = 'templates.json'
+HISTORY_FILE = 'history.json'
 HEADLESS_MODE = False
+
+def load_history():
+    if os.path.exists(HISTORY_FILE):
+        try:
+            with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except:
+            return {}
+    return {}
+
+def save_history(data):
+    with open(HISTORY_FILE, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+@app.get("/api/workspaces/{workspace_id}/history")
+async def get_workspace_history(workspace_id: str):
+    history_db = load_history()
+    ws_history = history_db.get(workspace_id, [])
+    return JSONResponse(ws_history)
+
+def load_templates():
+    if os.path.exists(TEMPLATES_FILE):
+        try:
+            with open(TEMPLATES_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except:
+            return {}
+    return {}
+
+def save_templates(data):
+    with open(TEMPLATES_FILE, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+@app.get("/api/templates")
+async def get_templates():
+    return JSONResponse(load_templates())
+
+@app.post("/api/templates/{template_id}")
+async def save_template_endpoint(template_id: str, request: Request):
+    data = await request.json()
+    templates_db = load_templates()
+    templates_db[template_id] = {
+        "name": data.get("name", "New Template"),
+        "description": data.get("description", ""),
+        "steps": data.get("steps", [])
+    }
+    save_templates(templates_db)
+    return JSONResponse({"status": "success"})
 
 def load_globals():
     if os.path.exists(GLOBALS_FILE):
@@ -519,6 +571,40 @@ async def run_workflow_engine(steps, workspace_id, stream_queue=None, profile_id
                 index += 1
                 continue
 
+            elif step_type == 'webhook':
+                webhook_url = chat_url # Reuse chat_url field for webhook url
+                if not webhook_url:
+                    results[str(step_id)] = "[FAILED] No webhook URL provided."
+                    if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Error', 'result': results[str(step_id)]})}\n\n"
+                    index += 1
+                    continue
+
+                if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Sending Webhook', 'message': f'POSTing to {webhook_url}'})}\n\n"
+
+                final_payload_str = prompt_template
+                for past_id, past_output in results.items():
+                    tag = f"{{{{OUTPUT_{past_id}}}}}"
+                    if tag in final_payload_str:
+                        # Ensure proper escaping for JSON payloads if injecting directly
+                        import json
+                        escaped_output = json.dumps(past_output)[1:-1] # Strip quotes but keep escapes
+                        final_payload_str = final_payload_str.replace(tag, escaped_output)
+
+                import httpx
+                try:
+                    payload = json.loads(final_payload_str)
+                    async with httpx.AsyncClient() as client:
+                        resp = await client.post(webhook_url, json=payload, timeout=15.0)
+                        resp.raise_for_status()
+                        results[str(step_id)] = f"Webhook success: {resp.status_code}\n{resp.text}"
+                        if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Complete', 'result': results[str(step_id)], 'show_result': show_result})}\n\n"
+                except Exception as e:
+                    results[str(step_id)] = f"[WEBHOOK FAILED] {str(e)}"
+                    if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Error', 'result': results[str(step_id)]})}\n\n"
+
+                index += 1
+                continue
+
             elif step_type == 'python':
                 # Execute Python Script
                 if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Executing Python', 'message': 'Running custom Python logic...'})}\n\n"
@@ -875,6 +961,22 @@ async def run_workflow_engine(steps, workspace_id, stream_queue=None, profile_id
                 epics[workspace_id]["results"] = results
                 save_epics(epics)
 
+            # Save to Time Machine History
+            history_db = load_history()
+            if workspace_id not in history_db:
+                history_db[workspace_id] = []
+
+            timestamp = datetime.datetime.now().isoformat()
+            history_db[workspace_id].append({
+                "timestamp": timestamp,
+                "results": results
+            })
+
+            # Keep only last 10
+            if len(history_db[workspace_id]) > 10:
+                history_db[workspace_id] = history_db[workspace_id][-10:]
+            save_history(history_db)
+
             # If webhook exists, we could export it here
             webhook_url = epics.get(workspace_id, {}).get("webhook_url")
             if webhook_url:
@@ -885,7 +987,7 @@ async def run_workflow_engine(steps, workspace_id, stream_queue=None, profile_id
                 except Exception as e:
                     logging.error(f"Webhook execution failed: {e}")
 
-        if stream_queue: yield f"data: {json.dumps({'status': 'Workflow Finished', 'results': results})}\n\n"
+        if stream_queue: yield f"data: {json.dumps({'status': 'Workflow Finished', 'results': results, 'timestamp': timestamp if workspace_id else None})}\n\n"
     finally:
         if page:
             await page.close()

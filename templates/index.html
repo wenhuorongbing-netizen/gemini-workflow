@@ -107,6 +107,7 @@
             </div>
 
             <button class="btn" style="width: 100%; background-color: #8e44ad; color: white; margin-top: auto;" onclick="openGlobalsModal()">🔒 Global Vault</button>
+            <button class="btn" style="width: 100%; background-color: #3498db; color: white; margin-top: 10px;" onclick="openTemplateLibrary()">📚 Template Library</button>
         </div>
 
         <div class="sidebar">
@@ -132,6 +133,7 @@
                 <label style="color: #7f8c8d; font-size: 0.9em; display: flex; align-items: center;">
                     <input type="checkbox" id="headless-toggle" onchange="toggleHeadlessMode(this.checked)" style="margin-right: 5px;"> Run in Headless Mode
                 </label>
+                <button class="btn" style="background-color: #34495e; color: white;" onclick="saveCurrentAsTemplate()">💾 Save as Template</button>
                     <button class="btn" style="background-color: #95a5a6; color: white;" onclick="exportWorkflow()">📥 Export Workflow</button>
                     <button class="btn" style="background-color: #95a5a6; color: white;" onclick="triggerImport()">📤 Import Workflow</button>
                     <input type="file" id="import-file" style="display:none" accept=".json" onchange="importWorkflow(event)">
@@ -162,6 +164,15 @@
 
             <!-- Dashboard View -->
             <div id="dashboard-view">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                    <h2 style="margin: 0;">Dashboard</h2>
+                    <div>
+                        <label style="font-size: 0.9em; color: #7f8c8d; margin-right: 5px;">⏳ Time Machine:</label>
+                        <select id="history-selector" onchange="loadHistorySnapshot(this.value)" style="padding: 5px; border-radius: 4px; border: 1px solid #ccc;">
+                            <option value="latest">Latest Run</option>
+                        </select>
+                    </div>
+                </div>
                 <div class="dashboard-grid">
                     <div class="dashboard-col primary">
                         <h3>Primary Output</h3>
@@ -241,6 +252,18 @@
         </div>
     </div>
 
+    <!-- Template Library Modal -->
+    <div id="template-library-modal" class="modal">
+        <div class="modal-content" style="width: 600px;">
+            <h3>📚 Template Library</h3>
+            <p style="font-size: 0.85em; color: #7f8c8d;">Load predefined workflows into your current workspace.</p>
+            <div id="template-list" style="text-align: left; max-height: 400px; overflow-y: auto; margin-bottom: 15px;">
+                <!-- Templates injected here -->
+            </div>
+            <button class="btn" onclick="closeTemplateLibraryModal()">Close</button>
+        </div>
+    </div>
+
     <!-- Edit Prompt Modal -->
         <div class="modal-content">
             <h3>Edit Prompt Name</h3>
@@ -275,6 +298,7 @@
         let currentWorkspaceId = null;
         let lastExecutionResults = {};
         let resultViewMode = 'final'; // 'final' or 'technical'
+        let historyData = [];
 
         // --- Global Settings ---
         async function loadHeadlessState() {
@@ -367,6 +391,7 @@
                 renderDashboard();
                 renderResultsContainer();
                 loadWorkspaces(); // Refresh sidebar active state
+                fetchHistory(id);
 
             } catch (e) {
                 console.error("Error switching workspace", e);
@@ -423,6 +448,130 @@
                 closeSettingsWsModal();
             } catch (e) {
                 console.error("Error updating workspace settings", e);
+            }
+        }
+
+        // --- History Time Machine Logic ---
+        async function fetchHistory(wsId) {
+            try {
+                const res = await fetch(`/api/workspaces/${wsId}/history`);
+                historyData = await res.json();
+                const sel = document.getElementById('history-selector');
+                sel.innerHTML = '<option value="latest">Latest Run</option>';
+
+                historyData.slice().reverse().forEach((run, idx) => {
+                    const d = new Date(run.timestamp);
+                    const opt = document.createElement('option');
+                    opt.value = historyData.length - 1 - idx; // store actual index
+                    opt.innerText = d.toLocaleString();
+                    sel.appendChild(opt);
+                });
+            } catch (e) {
+                console.error("Error fetching history", e);
+            }
+        }
+
+        function loadHistorySnapshot(val) {
+            if (val === 'latest') {
+                switchWorkspace(currentWorkspaceId);
+            } else {
+                const run = historyData[parseInt(val)];
+                if (run) {
+                    lastExecutionResults = run.results;
+                    renderDashboard();
+                    renderResultsContainer();
+                }
+            }
+        }
+
+        // --- Template Library Logic ---
+        async function openTemplateLibrary() {
+            try {
+                const res = await fetch('/api/templates');
+                const data = await res.json();
+                const list = document.getElementById('template-list');
+                list.innerHTML = '';
+                if (Object.keys(data).length === 0) {
+                    list.innerHTML = '<p>No templates saved yet. Save your current workflow as a template!</p>';
+                }
+                for (const [id, tmpl] of Object.entries(data)) {
+                    const div = document.createElement('div');
+                    div.style.border = '1px solid #ccc';
+                    div.style.padding = '10px';
+                    div.style.marginBottom = '10px';
+                    div.style.borderRadius = '4px';
+                    div.innerHTML = `
+                        <div style="font-weight: bold; color: #2c3e50; font-size: 1.1em;">${tmpl.name}</div>
+                        <div style="font-size: 0.85em; color: #7f8c8d; margin-bottom: 10px;">${tmpl.description}</div>
+                        <button class="btn btn-run" style="font-size: 0.8em; padding: 5px 10px;" onclick="useTemplate('${id}')">Use Template</button>
+                    `;
+                    list.appendChild(div);
+                }
+                document.getElementById('template-library-modal').style.display = 'block';
+            } catch (e) {
+                console.error("Error loading templates", e);
+            }
+        }
+
+        function closeTemplateLibraryModal() {
+            document.getElementById('template-library-modal').style.display = 'none';
+        }
+
+        async function useTemplate(id) {
+            if (!currentWorkspaceId) {
+                alert("Please create or select a Workspace first.");
+                closeTemplateLibraryModal();
+                return;
+            }
+            if (!confirm("This will overwrite your current workspace's steps. Continue?")) return;
+            try {
+                const res = await fetch('/api/templates');
+                const data = await res.json();
+                const tmpl = data[id];
+                if (tmpl && tmpl.steps) {
+                    // Clear and rebuild steps
+                    document.getElementById('workflow-steps').innerHTML = '';
+                    stepCount = 0;
+                    tmpl.steps.forEach(step => addStep(step.prompt, step.new_chat, step.type || 'standard', step.chat_url || '', step.show_result !== undefined ? step.show_result : true, step.dash_column || 'primary', step.is_important || false));
+                    saveDraft();
+                }
+                closeTemplateLibraryModal();
+            } catch (e) {
+                console.error("Error applying template", e);
+            }
+        }
+
+        async function saveCurrentAsTemplate() {
+            if (stepCount === 0) return alert("Nothing to save!");
+            const name = prompt("Enter a name for this template:");
+            if (!name) return;
+            const description = prompt("Enter a short description:");
+
+            const steps = [];
+            for (let i = 1; i <= stepCount; i++) {
+                const promptElem = document.getElementById(`prompt-${i}`);
+                if (!promptElem) continue;
+                steps.push({
+                    prompt: promptElem.value,
+                    new_chat: document.getElementById(`newchat-${i}`).checked,
+                    type: document.getElementById(`steptype-${i}`).value,
+                    dash_column: document.getElementById(`dashcol-${i}`) ? document.getElementById(`dashcol-${i}`).value : 'primary',
+                    chat_url: document.getElementById(`chaturl-${i}`) ? document.getElementById(`chaturl-${i}`).value : '',
+                    show_result: document.getElementById(`show-result-${i}`) ? document.getElementById(`show-result-${i}`).checked : true,
+                    is_important: document.getElementById(`is-important-${i}`) ? document.getElementById(`is-important-${i}`).checked : false
+                });
+            }
+
+            const id = Date.now().toString();
+            try {
+                await fetch(`/api/templates/${id}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name, description, steps })
+                });
+                alert("Template saved!");
+            } catch (e) {
+                console.error("Error saving template", e);
             }
         }
 
@@ -557,6 +706,7 @@
                         <option value="python" ${stepType === 'python' ? 'selected' : ''}>Python Script</option>
                         <option value="scraper" ${stepType === 'scraper' ? 'selected' : ''}>URL Scraper</option>
                         <option value="correction" ${stepType === 'correction' ? 'selected' : ''}>Self-Correction Loop</option>
+                        <option value="webhook" ${stepType === 'webhook' ? 'selected' : ''}>Webhook POST</option>
                     </select>
                     <select class="dash-col-selector" id="dashcol-${stepId}" onchange="saveDraft()" style="margin-left: 10px;">
                         <option value="primary" ${dashColumn === 'primary' ? 'selected' : ''}>Dashboard: Primary</option>
@@ -743,9 +893,21 @@
             } else if (selectElem.value === 'correction') {
                 textarea.placeholder = 'e.g., IF {{OUTPUT_1}} NOT CONTAINS "Keyword" THEN PROMPT: "Please rewrite and include Keyword"';
                 optionsDiv.style.display = 'none';
+            } else if (selectElem.value === 'webhook') {
+                textarea.placeholder = '{\n  "text": "Here is the summary: {% raw %}{{OUTPUT_1}}{% endraw %}"\n}';
+                optionsDiv.style.display = 'flex';
+                const chatUrlInput = document.getElementById(`chaturl-${stepId}`);
+                if (chatUrlInput) {
+                    chatUrlInput.placeholder = 'Target Webhook URL (e.g. Slack/Make.com)';
+                    chatUrlInput.style.display = 'inline-block';
+                }
             } else {
                 textarea.placeholder = "Enter prompt for Step " + stepId + "...";
                 optionsDiv.style.display = 'flex';
+                const chatUrlInput = document.getElementById(`chaturl-${stepId}`);
+                if (chatUrlInput) {
+                    chatUrlInput.placeholder = 'Target Chat URL (Optional, e.g., https://gemini.google.com/app/...)';
+                }
             }
             saveDraft();
             updateToolbars();
@@ -1154,6 +1316,9 @@
                                         lastExecutionResults = data.results;
                                         renderResultsContainer();
                                         renderDashboard();
+                                    }
+                                    if (currentWorkspaceId) {
+                                        fetchHistory(currentWorkspaceId);
                                     }
                                     break;
                                 }

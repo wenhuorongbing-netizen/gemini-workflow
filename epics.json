@@ -5,7 +5,11 @@
     "steps": [
       {
         "prompt": "test prompt",
-        "type": "standard"
+        "new_chat": false,
+        "type": "standard",
+        "chat_url": "",
+        "show_result": true,
+        "dash_column": "primary"
       }
     ]
   },
@@ -83,6 +87,54 @@
         "dash_column": "primary"
       }
     ],
+    "results": {}
+  },
+  "1773429811872": {
+    "name": "Webhook Test Workspace",
+    "steps": [],
+    "results": {}
+  },
+  "1773429994544": {
+    "name": "Webhook Test Workspace",
+    "steps": [],
+    "results": {}
+  },
+  "1773430178268": {
+    "name": "Webhook Test Workspace",
+    "steps": [
+      {
+        "prompt": "",
+        "new_chat": false,
+        "type": "standard",
+        "chat_url": "",
+        "show_result": true,
+        "dash_column": "primary"
+      }
+    ],
+    "results": {}
+  },
+  "1773430437539": {
+    "name": "Webhook Test Workspace",
+    "steps": [
+      {
+        "prompt": "",
+        "new_chat": false,
+        "type": "standard",
+        "chat_url": "",
+        "show_result": true,
+        "dash_column": "primary"
+      }
+    ],
+    "results": {}
+  },
+  "1773430562602": {
+    "name": "Webhook Test Workspace",
+    "steps": [],
+    "results": {}
+  },
+  "1773430634864": {
+    "name": "Webhook Test Workspace",
+    "steps": [],
     "results": {}
   }
 }
