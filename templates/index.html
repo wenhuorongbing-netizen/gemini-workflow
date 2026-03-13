@@ -125,7 +125,10 @@
 
             <div class="global-actions">
                 <button class="btn btn-add" onclick="addStep()">+ Add Step</button>
-                <div style="display: flex; gap: 10px;">
+            <div style="display: flex; gap: 10px; align-items: center;">
+                <label style="color: #7f8c8d; font-size: 0.9em; display: flex; align-items: center;">
+                    <input type="checkbox" id="headless-toggle" onchange="toggleHeadlessMode(this.checked)" style="margin-right: 5px;"> Run in Headless Mode
+                </label>
                     <button class="btn" style="background-color: #95a5a6; color: white;" onclick="exportWorkflow()">📥 Export Workflow</button>
                     <button class="btn" style="background-color: #95a5a6; color: white;" onclick="triggerImport()">📤 Import Workflow</button>
                     <input type="file" id="import-file" style="display:none" accept=".json" onchange="importWorkflow(event)">
@@ -178,6 +181,25 @@
         </div>
     </div>
 
+    <!-- Workspace Settings Modal -->
+    <div id="settings-ws-modal" class="modal">
+        <div class="modal-content">
+            <h3>Workspace Settings</h3>
+            <p style="font-size: 0.8em; color: #555;">Advanced automation triggers.</p>
+            <input type="hidden" id="settings-ws-id">
+            <div style="text-align: left; margin-bottom: 10px;">
+                <label style="font-weight: bold; font-size: 0.9em;">Watch Folder Path (Auto-Trigger):</label><br>
+                <input type="text" id="settings-ws-watch" placeholder="/path/to/folder" style="width: 95%; margin-top: 5px;">
+            </div>
+            <div style="text-align: left; margin-bottom: 15px;">
+                <label style="font-weight: bold; font-size: 0.9em;">Auto-Export Webhook URL:</label><br>
+                <input type="text" id="settings-ws-webhook" placeholder="https://api.example.com/webhook" style="width: 95%; margin-top: 5px;">
+            </div>
+            <button class="btn btn-run" onclick="confirmSettingsWorkspace()">Save</button>
+            <button class="btn" onclick="closeSettingsWsModal()">Cancel</button>
+        </div>
+    </div>
+
     <!-- Edit Prompt Modal -->
     <div id="edit-modal" class="modal">
         <div class="modal-content">
@@ -202,6 +224,29 @@
         let lastExecutionResults = {};
         let resultViewMode = 'final'; // 'final' or 'technical'
 
+        // --- Global Settings ---
+        async function loadHeadlessState() {
+            try {
+                const res = await fetch('/api/settings/headless');
+                const data = await res.json();
+                document.getElementById('headless-toggle').checked = data.headless;
+            } catch (e) {
+                console.error("Error loading headless state", e);
+            }
+        }
+
+        async function toggleHeadlessMode(isHeadless) {
+            try {
+                await fetch('/api/settings/headless', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ headless: isHeadless })
+                });
+            } catch (e) {
+                console.error("Error updating headless mode", e);
+            }
+        }
+
         // --- Workspace Management ---
         async function loadWorkspaces() {
             try {
@@ -216,6 +261,7 @@
                     div.innerHTML = `
                         <div class="workspace-name" title="${ws.name}" onclick="switchWorkspace('${ws.id}')">${ws.name}</div>
                         <div class="workspace-actions">
+                            <span onclick="openSettingsWsModal('${ws.id}', '${ws.name.replace(/'/g, "\\'")}', '${ws.watch_folder ? ws.watch_folder.replace(/\\/g, "\\\\").replace(/'/g, "\\'") : ''}', '${ws.webhook_url || ''}')" title="Settings">⚙️</span>
                             <span onclick="openEditWsModal('${ws.id}', '${ws.name.replace(/'/g, "\\'")}')" title="Rename">✎</span>
                             <span onclick="deleteWorkspace('${ws.id}')" title="Delete" style="color:#e74c3c;">×</span>
                         </div>
@@ -296,6 +342,34 @@
 
         function closeWsModal() {
             document.getElementById('edit-ws-modal').style.display = 'none';
+        }
+
+        function openSettingsWsModal(id, name, watchFolder, webhookUrl) {
+            document.getElementById('settings-ws-id').value = id;
+            document.getElementById('settings-ws-watch').value = watchFolder && watchFolder !== 'undefined' ? watchFolder : '';
+            document.getElementById('settings-ws-webhook').value = webhookUrl && webhookUrl !== 'undefined' ? webhookUrl : '';
+            document.getElementById('settings-ws-modal').style.display = 'block';
+        }
+
+        function closeSettingsWsModal() {
+            document.getElementById('settings-ws-modal').style.display = 'none';
+        }
+
+        async function confirmSettingsWorkspace() {
+            const id = document.getElementById('settings-ws-id').value;
+            const watch_folder = document.getElementById('settings-ws-watch').value;
+            const webhook_url = document.getElementById('settings-ws-webhook').value;
+            try {
+                await fetch(`/api/workspaces/${id}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ watch_folder, webhook_url })
+                });
+                loadWorkspaces();
+                closeSettingsWsModal();
+            } catch (e) {
+                console.error("Error updating workspace settings", e);
+            }
         }
 
         async function confirmEditWorkspace() {

@@ -6,3 +6,4 @@ python-multipart
 pytest
 httpx
 pytest-asyncio
+watchdog==3.0.0

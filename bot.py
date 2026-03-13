@@ -23,7 +23,7 @@ class GeminiBot:
         self.context: Optional[BrowserContext] = None
         self._initialized = False
 
-    async def initialize(self):
+    async def initialize(self, headless=False):
         """Asynchronously initializes the browser context and opens Gemini."""
         if self._initialized:
             return
@@ -32,10 +32,9 @@ class GeminiBot:
             self.playwright = await async_playwright().start()
 
             # Using persistent context to maintain login sessions
-            # headless=False is recommended for first login, then it can be toggled
             self.context = await self.playwright.chromium.launch_persistent_context(
                 user_data_dir=self.profile_path,
-                headless=False, # Set to True after initial login for better performance
+                headless=headless,
                 args=[
                     "--disable-infobars",
                     "--disable-extensions",
@@ -44,7 +43,7 @@ class GeminiBot:
                 ]
             )
 
-            logging.info("Playwright initialized.")
+            logging.info(f"Playwright initialized (headless={headless}).")
             self._initialized = True
 
         except Exception as e:
