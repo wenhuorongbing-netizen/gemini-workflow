@@ -1,45 +1,17 @@
-// prisma/schema.prisma
-
 generator client {
   provider = "prisma-client-js"
 }
 
 datasource db {
   provider = "sqlite"
+  url      = "file:../dev.db"
 }
 
-// 1. 用户表
-model User {
+model Workspace {
   id        String   @id @default(cuid())
-  username  String   @unique
-  password  String   // 极简校验，实际生产环境应加密，这里为了快速部署保持简单
-  points    Int      @default(1000) // 初始赠送 1000 积分
-  role      String   @default("USER") // 角色区分："USER" 或 "ADMIN"
-  bets      Bet[]    // 关联：一个用户可以有多次下注
+  name      String
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
-}
-
-// 2. 赛事表
-model Match {
-  id        String   @id @default(cuid())
-  playerA   String   // 选手A名字
-  playerB   String   // 选手B名字
-  status    String   @default("OPEN") // 状态："OPEN"(可下注), "CLOSED"(比赛中/停止下注), "SETTLED"(已结算)
-  winner    String?  // 获胜方："A" 或 "B"，结算前为 null
-  bets      Bet[]    // 关联：一场比赛可以有多个下注
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-}
-
-// 3. 下注记录表
-model Bet {
-  id        String   @id @default(cuid())
-  userId    String
-  matchId   String
-  amount    Int      // 下注积分数量
-  choice    String   // 选择支持哪一方："A" 或 "B"
-  user      User     @relation(fields: [userId], references: [id])
-  match     Match    @relation(fields: [matchId], references: [id])
-  createdAt DateTime @default(now())
+  steps     String   // JSON string of steps
+  results   String   // JSON string of results
 }
