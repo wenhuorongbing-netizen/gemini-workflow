@@ -106,6 +106,7 @@ async def execute_workflow(request: Request):
                 new_chat = step.get('new_chat', False)
                 step_type = step.get('type', 'standard')
                 chat_url = step.get('chat_url', '').strip()
+                show_result = step.get('show_result', True)
 
                 logging.info(f"Executing Step {step_id}")
                 yield f"data: {json.dumps({'step': step_id, 'status': 'Starting', 'message': f'Executing Step {step_id}...'})}\n\n"
@@ -113,7 +114,7 @@ async def execute_workflow(request: Request):
                 if step_type == 'batch':
                     # Batch Input Step
                     results[str(step_id)] = prompt_template
-                    yield f"data: {json.dumps({'step': step_id, 'status': 'Complete', 'result': prompt_template})}\n\n"
+                    yield f"data: {json.dumps({'step': step_id, 'status': 'Complete', 'result': prompt_template, 'show_result': show_result})}\n\n"
                     continue
 
                 if '{{CURRENT_ITEM}}' in prompt_template:
@@ -232,7 +233,7 @@ async def execute_workflow(request: Request):
 
                     final_result_text = "\n\n--- \n\n".join(batch_results)
                     results[str(step_id)] = final_result_text
-                    yield f"data: {json.dumps({'step': step_id, 'status': 'Complete', 'result': final_result_text})}\n\n"
+                    yield f"data: {json.dumps({'step': step_id, 'status': 'Complete', 'result': final_result_text, 'show_result': show_result})}\n\n"
                     continue
                 else:
                     # Standard or Aggregator Step
@@ -278,7 +279,7 @@ async def execute_workflow(request: Request):
                                 try:
                                     # Poll the queue for partial updates
                                     partial_text = await asyncio.wait_for(stream_queue.get(), timeout=0.5)
-                                    yield f"data: {json.dumps({'step': step_id, 'status': 'Typing', 'partial_result': partial_text})}\n\n"
+                                    yield f"data: {json.dumps({'step': step_id, 'status': 'Typing', 'partial_result': partial_text, 'show_result': show_result})}\n\n"
                                 except asyncio.TimeoutError:
                                     # Yield heartbeats or check cancel event
                                     if cancel_event and cancel_event.is_set():
@@ -298,7 +299,7 @@ async def execute_workflow(request: Request):
 
                             results[str(step_id)] = response_text
 
-                            yield f"data: {json.dumps({'step': step_id, 'status': 'Complete', 'result': response_text})}\n\n"
+                            yield f"data: {json.dumps({'step': step_id, 'status': 'Complete', 'result': response_text, 'show_result': show_result})}\n\n"
                             logging.info(f"Step {step_id} completed successfully.")
                             step_success = True
                             break

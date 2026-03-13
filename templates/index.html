@@ -118,7 +118,7 @@
         });
 
         // --- UI Interactions ---
-        function addStep(promptText = '', isNewChat = false, stepType = 'standard', chatUrl = '') {
+        function addStep(promptText = '', isNewChat = false, stepType = 'standard', chatUrl = '', showResult = true) {
             stepCount++;
             const stepId = stepCount;
             const container = document.getElementById('workflow-steps');
@@ -167,6 +167,10 @@
                     <input type="checkbox" id="newchat-${stepId}" onchange="saveDraft()" ${isNewChat ? 'checked' : ''}>
                     <label for="newchat-${stepId}">Start New Chat for this step</label>
                     <input type="text" id="chaturl-${stepId}" class="chat-url-input" placeholder="Target Chat URL (Optional, e.g., https://gemini.google.com/app/...)" value="${chatUrl}" oninput="saveDraft()" style="margin-left: 15px; width: 300px; padding: 4px; border-radius: 4px; border: 1px solid #ccc;">
+                </div>
+                <div class="options" style="display: flex; align-items: center; margin-top: 5px;">
+                    <input type="checkbox" id="show-result-${stepId}" onchange="saveDraft()" ${showResult ? 'checked' : ''}>
+                    <label for="show-result-${stepId}">Show in Final Result</label>
                 </div>
             `;
 
@@ -252,6 +256,13 @@
                 const chatUrlInput = step.querySelector('.chat-url-input');
                 if (chatUrlInput) {
                     chatUrlInput.id = `chaturl-${newId}`;
+                }
+
+                const showResultCheckbox = step.querySelectorAll('input[type="checkbox"]')[1];
+                if (showResultCheckbox) {
+                    showResultCheckbox.id = `show-result-${newId}`;
+                    const showResultLabel = step.querySelectorAll('label')[1];
+                    showResultLabel.setAttribute('for', `show-result-${newId}`);
                 }
 
                 const toolbar = step.querySelector('.toolbar');
@@ -342,7 +353,8 @@
                 const newChat = document.getElementById(`newchat-${i}`).checked;
                 const stepType = document.getElementById(`steptype-${i}`).value;
                 const chatUrl = document.getElementById(`chaturl-${i}`) ? document.getElementById(`chaturl-${i}`).value : '';
-                steps.push({ prompt, new_chat: newChat, type: stepType, chat_url: chatUrl });
+                const showResult = document.getElementById(`show-result-${i}`) ? document.getElementById(`show-result-${i}`).checked : true;
+                steps.push({ prompt, new_chat: newChat, type: stepType, chat_url: chatUrl, show_result: showResult });
             }
             localStorage.setItem('geminiDraft', JSON.stringify(steps));
         }
@@ -350,7 +362,7 @@
         function loadDraft() {
             const draft = JSON.parse(localStorage.getItem('geminiDraft'));
             if (draft && draft.length > 0) {
-                draft.forEach(step => addStep(step.prompt, step.new_chat, step.type || 'standard', step.chat_url || ''));
+                draft.forEach(step => addStep(step.prompt, step.new_chat, step.type || 'standard', step.chat_url || '', step.show_result !== undefined ? step.show_result : true));
             } else {
                 addStep();
             }
@@ -433,7 +445,8 @@
                 const newChat = document.getElementById(`newchat-${i}`).checked;
                 const stepType = document.getElementById(`steptype-${i}`).value;
                 const chatUrl = document.getElementById(`chaturl-${i}`) ? document.getElementById(`chaturl-${i}`).value : '';
-                steps.push({ prompt, new_chat: newChat, type: stepType, chat_url: chatUrl });
+                const showResult = document.getElementById(`show-result-${i}`) ? document.getElementById(`show-result-${i}`).checked : true;
+                steps.push({ prompt, new_chat: newChat, type: stepType, chat_url: chatUrl, show_result: showResult });
             }
             if (steps.length === 0) return alert("Nothing to export!");
 
@@ -464,7 +477,7 @@
                         stepCount = 0;
 
                         // Reconstruct steps
-                        steps.forEach(step => addStep(step.prompt, step.new_chat, step.type || 'standard', step.chat_url || ''));
+                        steps.forEach(step => addStep(step.prompt, step.new_chat, step.type || 'standard', step.chat_url || '', step.show_result !== undefined ? step.show_result : true));
                         saveDraft();
 
                         // Reset file input
@@ -505,12 +518,13 @@
                 const newChat = document.getElementById(`newchat-${i}`).checked;
                 const stepType = document.getElementById(`steptype-${i}`).value;
                 const chatUrl = document.getElementById(`chaturl-${i}`) ? document.getElementById(`chaturl-${i}`).value.trim() : '';
+                const showResult = document.getElementById(`show-result-${i}`) ? document.getElementById(`show-result-${i}`).checked : true;
 
                 if (!prompt) {
                     alert(`Step ${i} cannot be empty.`);
                     return;
                 }
-                steps.push({ prompt, new_chat: newChat, type: stepType, chat_url: chatUrl });
+                steps.push({ prompt, new_chat: newChat, type: stepType, chat_url: chatUrl, show_result: showResult });
             }
 
             if (steps.length === 0) return alert("Please add at least one step.");
@@ -592,59 +606,63 @@
 
                                 // Handle Typing status for Pseudo-Streaming
                                 if (data.status === 'Typing' && data.step) {
-                                     let div = document.getElementById(`result-step-${data.step}`);
-                                     if (!div) {
-                                         div = document.createElement('div');
-                                         div.className = 'result-item';
-                                         div.id = `result-step-${data.step}`;
+                                     if (data.show_result !== false) {
+                                         let div = document.getElementById(`result-step-${data.step}`);
+                                         if (!div) {
+                                             div = document.createElement('div');
+                                             div.className = 'result-item';
+                                             div.id = `result-step-${data.step}`;
 
-                                         const titleDiv = document.createElement('div');
-                                         titleDiv.className = 'result-title';
-                                         titleDiv.textContent = `Output of Step ${data.step} (Typing...):`;
+                                             const titleDiv = document.createElement('div');
+                                             titleDiv.className = 'result-title';
+                                             titleDiv.textContent = `Output of Step ${data.step} (Typing...):`;
 
-                                         const textDiv = document.createElement('div');
-                                         textDiv.className = 'result-text';
-                                         textDiv.id = `result-text-${data.step}`;
+                                             const textDiv = document.createElement('div');
+                                             textDiv.className = 'result-text';
+                                             textDiv.id = `result-text-${data.step}`;
 
-                                         div.appendChild(titleDiv);
-                                         div.appendChild(textDiv);
-                                         resultsList.appendChild(div);
-                                     }
-                                     const textDiv = document.getElementById(`result-text-${data.step}`);
-                                     if (textDiv) {
-                                         textDiv.innerHTML = DOMPurify.sanitize(marked.parse(data.partial_result));
+                                             div.appendChild(titleDiv);
+                                             div.appendChild(textDiv);
+                                             resultsList.appendChild(div);
+                                         }
+                                         const textDiv = document.getElementById(`result-text-${data.step}`);
+                                         if (textDiv) {
+                                             textDiv.innerHTML = DOMPurify.sanitize(marked.parse(data.partial_result));
+                                         }
                                      }
                                 }
 
                                 // Check if we received a completed result chunk for a step
                                 if (data.result !== undefined && data.step) {
-                                     let div = document.getElementById(`result-step-${data.step}`);
-                                     if (!div) {
-                                         div = document.createElement('div');
-                                         div.className = 'result-item';
-                                         div.id = `result-step-${data.step}`;
+                                     if (data.show_result !== false) {
+                                         let div = document.getElementById(`result-step-${data.step}`);
+                                         if (!div) {
+                                             div = document.createElement('div');
+                                             div.className = 'result-item';
+                                             div.id = `result-step-${data.step}`;
 
-                                         const titleDiv = document.createElement('div');
-                                         titleDiv.className = 'result-title';
-                                         titleDiv.id = `result-title-${data.step}`;
+                                             const titleDiv = document.createElement('div');
+                                             titleDiv.className = 'result-title';
+                                             titleDiv.id = `result-title-${data.step}`;
 
-                                         const textDiv = document.createElement('div');
-                                         textDiv.className = 'result-text';
-                                         textDiv.id = `result-text-${data.step}`;
+                                             const textDiv = document.createElement('div');
+                                             textDiv.className = 'result-text';
+                                             textDiv.id = `result-text-${data.step}`;
 
-                                         div.appendChild(titleDiv);
-                                         div.appendChild(textDiv);
-                                         resultsList.appendChild(div);
-                                     }
+                                             div.appendChild(titleDiv);
+                                             div.appendChild(textDiv);
+                                             resultsList.appendChild(div);
+                                         }
 
-                                     const titleDiv = div.querySelector('.result-title') || document.getElementById(`result-title-${data.step}`);
-                                     if (titleDiv) {
-                                         titleDiv.textContent = `Output of Step ${data.step}:`;
-                                     }
+                                         const titleDiv = div.querySelector('.result-title') || document.getElementById(`result-title-${data.step}`);
+                                         if (titleDiv) {
+                                             titleDiv.textContent = `Output of Step ${data.step}:`;
+                                         }
 
-                                     const textDiv = document.getElementById(`result-text-${data.step}`);
-                                     if (textDiv) {
-                                         textDiv.innerHTML = DOMPurify.sanitize(marked.parse(data.result));
+                                         const textDiv = document.getElementById(`result-text-${data.step}`);
+                                         if (textDiv) {
+                                             textDiv.innerHTML = DOMPurify.sanitize(marked.parse(data.result));
+                                         }
                                      }
                                 }
 
