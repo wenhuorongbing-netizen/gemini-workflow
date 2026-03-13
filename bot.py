@@ -203,56 +203,6 @@ class GeminiBot:
         except Exception as e:
             raise Exception(f"Timeout: Gemini did not finish responding within {timeout/1000} seconds. Error: {e}")
 
-    async def prompt_jules_and_poll(self, page: Page, target_url: str, prompt: str) -> str:
-        """
-        Navigates to the Jules interface, submits a prompt, and polls for completion.
-        Returns the final extracted result/branch link.
-        """
-        try:
-            logging.info(f"Navigating to Jules target URL: {target_url}")
-            await page.goto(target_url, wait_until="domcontentloaded")
-
-            # Find Jules input box
-            input_box = page.locator("textarea").first
-            await input_box.wait_for(state="visible", timeout=20000)
-            await input_box.fill(prompt)
-            logging.info("Entered prompt into Jules.")
-
-            # Press enter to submit
-            await page.keyboard.press("Enter")
-            logging.info("Submitted prompt to Jules.")
-
-            # Polling loop
-            logging.info("Polling Jules for 'Ready for review'...")
-            max_polls = 60 # 10 minutes max (60 * 10s)
-            poll_count = 0
-
-            while poll_count < max_polls:
-                await asyncio.sleep(10)
-                poll_count += 1
-
-                # Check for completion text
-                if await page.locator("text='Ready for review'").is_visible():
-                    logging.info("Jules reported 'Ready for review'.")
-
-                    # Extract the latest response from Jules
-                    # We assume it's in the DOM, potentially as a link or last text block
-                    # A robust generic fallback:
-                    body_text = await page.inner_text("body")
-                    # Try to extract a branch link if present
-                    import re
-                    match = re.search(r'(https://github\.com/\S+/tree/\S+)', body_text)
-                    if match:
-                        return f"Jules finished. Branch link: {match.group(1)}"
-                    return "Jules finished successfully. Status: Ready for review."
-
-            raise Exception("Timeout waiting for Jules to complete task.")
-
-        except Exception as e:
-            error_msg = f"Error during Jules agent loop: {e}"
-            logging.error(error_msg)
-            raise Exception(error_msg)
-
     async def get_last_response(self, page: Page) -> str:
         """
         Extracts the generated response text from the DOM.
@@ -283,3 +233,104 @@ class GeminiBot:
         if self.playwright:
             await self.playwright.stop()
         logging.info("Browser closed.")
+
+
+class JulesBot:
+    """
+    A class to interact with the Jules developer interface via Playwright.
+    """
+    def __init__(self, profile_id="1"):
+        self.profile_id = profile_id
+        self.playwright = None
+        self.browser = None
+        self.context = None
+        self._initialized = False
+
+    async def initialize(self):
+        if self._initialized:
+            return
+
+        self.playwright = await async_playwright().start()
+
+        # User data directory for persistence, separate from Gemini's profile
+        user_data_dir = f"/tmp/jules_profile_{self.profile_id}"
+
+        self.context = await self.playwright.chromium.launch_persistent_context(
+            user_data_dir=user_data_dir,
+            headless=True,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-infobars",
+                "--window-size=1280,800"
+            ],
+            viewport={"width": 1280, "height": 800}
+        )
+
+        self._initialized = True
+        logging.info(f"JulesBot context initialized for profile {self.profile_id}")
+
+    async def create_new_page(self) -> Page:
+        if not self._initialized:
+            await self.initialize()
+        return await self.context.new_page()
+
+    async def send_task(self, page: Page, url: str, prompt: str):
+        """
+        Navigates to the target URL and submits the prompt to Jules.
+        """
+        try:
+            logging.info(f"Navigating to Jules target URL: {url}")
+            await page.goto(url, wait_until="domcontentloaded")
+
+            input_box = page.locator("textarea").first
+            await input_box.wait_for(state="visible", timeout=20000)
+            await input_box.fill(prompt)
+            logging.info("Entered prompt into Jules.")
+
+            await page.keyboard.press("Enter")
+            logging.info("Submitted prompt to Jules.")
+
+        except Exception as e:
+            error_msg = f"Error sending task to Jules: {e}"
+            logging.error(error_msg)
+            raise Exception(error_msg)
+
+    async def poll_for_completion(self, page: Page) -> str:
+        """
+        Polls the DOM for the 'Ready for review' text indicating completion.
+        Uses asyncio.sleep(15) to be non-blocking.
+        """
+        logging.info("Polling Jules for 'Ready for review'...")
+        max_polls = 40 # 10 minutes max (40 * 15s)
+        poll_count = 0
+
+        while poll_count < max_polls:
+            await asyncio.sleep(15)
+            poll_count += 1
+
+            try:
+                # Check for completion text
+                if await page.locator("text='Ready for review'").is_visible():
+                    logging.info("Jules reported 'Ready for review'.")
+
+                    body_text = await page.inner_text("body")
+                    # Extract branch link using regex
+                    import re
+                    match = re.search(r'(https://github\.com/\S+/tree/\S+)', body_text)
+                    if match:
+                        return f"Jules finished. Branch link: {match.group(1)}"
+                    return "Jules finished successfully. Status: Ready for review."
+            except Exception as e:
+                logging.debug(f"Error during Jules polling check: {e}")
+
+        raise Exception("Timeout waiting for Jules to complete task.")
+
+    async def quit(self):
+        """Closes the browser."""
+        if self.context:
+            await self.context.close()
+        if self.playwright:
+            await self.playwright.stop()
+        logging.info("JulesBot Browser closed.")
