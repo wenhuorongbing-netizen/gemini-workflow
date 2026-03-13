@@ -83,6 +83,7 @@ logging.basicConfig(
 
 # Global bot instance to maintain session state asynchronously
 bot = None
+current_profile_id = "1"
 # A simple async semaphore to allow concurrent executions up to a limit
 bot_semaphore = None
 # Global event to signal emergency stop
@@ -223,17 +224,41 @@ async def stop_workflow():
         cancel_event.set()
     return {"status": "stopping"}
 
-async def get_bot():
+async def get_bot(profile_id="1"):
     global bot
+    global current_profile_id
+
+    if bot is not None and current_profile_id != profile_id:
+        logging.info(f"Switching chrome profile from {current_profile_id} to {profile_id}...")
+        await bot.quit()
+        bot = None
+
     if bot is None or bot._initialized is False:
         try:
-            new_bot = GeminiBot()
+            profile_path = f"chrome_profile_{profile_id}" if profile_id != "1" else "chrome_profile"
+            new_bot = GeminiBot(profile_path=profile_path)
             await new_bot.initialize(headless=HEADLESS_MODE)
             bot = new_bot
+            current_profile_id = profile_id
         except Exception as e:
-            logging.error(f"Failed to initialize Gemini Bot: {e}")
-            raise Exception("Failed to initialize bot. Ensure Chrome profile path is valid.")
+            logging.error(f"Failed to initialize Gemini Bot for profile {profile_id}: {e}")
+            raise Exception(f"Failed to initialize bot for profile {profile_id}. Ensure Chrome profile path is valid.")
     return bot
+
+@app.get("/api/logs")
+async def get_logs():
+    try:
+        if not os.path.exists("gemini_workflow_error.log"):
+            return JSONResponse({"logs": "Log file not found."})
+
+        with open("gemini_workflow_error.log", "r", encoding="utf-8") as f:
+            lines = f.readlines()
+
+        # Return last 100 lines
+        last_lines = lines[-100:]
+        return JSONResponse({"logs": "".join(last_lines)})
+    except Exception as e:
+        return JSONResponse({"logs": f"Error reading logs: {str(e)}"})
 
 @app.get("/api/workspaces")
 async def get_workspaces():
@@ -290,18 +315,19 @@ async def index(request: Request):
 
 import uuid
 
-async def run_workflow_engine(steps, workspace_id, stream_queue=None):
+async def run_workflow_engine(steps, workspace_id, stream_queue=None, profile_id="1"):
     run_id = str(uuid.uuid4())
     page = None
     try:
         try:
-            current_bot = await get_bot()
+            current_bot = await get_bot(profile_id)
             page = await current_bot.create_new_page()
         except Exception as e:
             if stream_queue: yield f"data: {json.dumps({'error': str(e)})}\n\n"
             return
 
         results = {}
+        correction_counts = {}
 
         index = 0
         while index < len(steps):
@@ -393,6 +419,58 @@ async def run_workflow_engine(steps, workspace_id, stream_queue=None):
                 except Exception as e:
                     results[str(step_id)] = f"[SCRAPE FAILED] {str(e)}"
                     if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Error', 'result': results[str(step_id)]})}\n\n"
+                index += 1
+                continue
+
+            elif step_type == 'correction':
+                import re
+                try:
+                    # e.g. IF {{OUTPUT_1}} NOT CONTAINS "Keyword" THEN PROMPT: "Please rewrite and include Keyword"
+                    match = re.search(r'IF\s+(.*?)\s+(CONTAINS|EQUALS|NOT CONTAINS)\s+"(.*?)"\s+THEN\s+PROMPT:\s+"(.*?)"', prompt_template, re.IGNORECASE)
+                    if match:
+                        var_raw, op, val, correction_prompt = match.groups()
+
+                        var_val = var_raw
+                        for past_id, past_output in results.items():
+                            tag = f"{{{{OUTPUT_{past_id}}}}}"
+                            if tag in var_val:
+                                var_val = var_val.replace(tag, past_output)
+
+                        condition_met = False
+                        op = op.upper()
+                        if op == 'CONTAINS':
+                            condition_met = val in var_val
+                        elif op == 'NOT CONTAINS':
+                            condition_met = val not in var_val
+                        elif op == 'EQUALS':
+                            condition_met = val == var_val
+
+                        if condition_met:
+                            loop_count = correction_counts.get(step_id, 0)
+                            if loop_count < 3:
+                                correction_counts[step_id] = loop_count + 1
+                                if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Self-Correcting', 'message': f'Quality check failed. Looping back (Attempt {loop_count + 1}/3)...'})}\n\n"
+
+                                # Go back to previous step
+                                index -= 1
+                                # Modify the previous step's prompt to include the correction
+                                prev_step = steps[index]
+                                prev_step['prompt'] += f"\n\n--- CORRECTION REQUIRED ---\n{correction_prompt}"
+                                continue
+                            else:
+                                if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Error', 'message': 'Max correction loops (3) exceeded. Proceeding anyway.'})}\n\n"
+                                results[str(step_id)] = "[CORRECTION FAILED] Max loops exceeded."
+                        else:
+                            if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Correction Evaluated', 'message': 'Quality check passed. Continuing...'})}\n\n"
+                            results[str(step_id)] = "Quality check passed."
+                    else:
+                        results[str(step_id)] = "[FAILED] Invalid Correction syntax"
+                        if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Error', 'message': 'Invalid Correction syntax'})}\n\n"
+                except Exception as e:
+                    results[str(step_id)] = f"[FAILED] {e}"
+                    if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Error', 'message': str(e)})}\n\n"
+
+                if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Complete', 'result': results[str(step_id)], 'show_result': show_result})}\n\n"
                 index += 1
                 continue
 
@@ -829,6 +907,7 @@ async def execute_workflow(request: Request):
 
     steps = data.get('steps', [])
     workspace_id = data.get('workspace_id')
+    profile_id = data.get('profile_id', '1')
 
     if not steps:
         return StreamingResponse(error_stream("No steps provided in workflow."), media_type="text/event-stream")
@@ -847,7 +926,7 @@ async def execute_workflow(request: Request):
 
     async def sse_wrapper():
         try:
-            async for event in run_workflow_engine(steps, workspace_id, stream_queue):
+            async for event in run_workflow_engine(steps, workspace_id, stream_queue, profile_id):
                 yield event
         finally:
             bot_semaphore.release()

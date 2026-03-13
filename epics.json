@@ -70,5 +70,19 @@
     "name": "Advanced Node Test Workspace",
     "steps": [],
     "results": {}
+  },
+  "1773425368232": {
+    "name": "Correction Test Workspace",
+    "steps": [
+      {
+        "prompt": "",
+        "new_chat": false,
+        "type": "standard",
+        "chat_url": "",
+        "show_result": true,
+        "dash_column": "primary"
+      }
+    ],
+    "results": {}
   }
 }
