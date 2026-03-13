@@ -479,6 +479,80 @@ async def run_workflow_engine(steps, workspace_id, stream_queue=None, profile_id
                 index += 1
                 continue
 
+            elif step_type == 'agentic_loop':
+                # Meta-Agent Loop (Gemini <-> Jules)
+                # Configuration should be embedded in the prompt_template via specific JSON syntax or custom parsing
+                # But to keep it simple, we extract from step dict or assume prompt_template has the initial instruction
+                jules_url = step.get('chat_url', '')
+                try:
+                    max_iterations = int(step.get('max_iterations', 3))
+                except ValueError:
+                    max_iterations = 3
+
+                loop_result = ""
+                current_gemini_prompt = prompt_template
+
+                if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Agent Loop Started', 'message': 'Initializing Dual-Bot Engine...'})}\n\n"
+
+                for i in range(max_iterations):
+                    if cancel_event and cancel_event.is_set():
+                        break
+
+                    if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Gemini Working', 'message': f'Iteration {i+1}: Gemini generating coding prompt...'})}\n\n"
+
+                    # 1. Prompt Gemini
+                    if new_chat and i == 0:
+                        await current_bot.start_new_chat(page)
+                    elif i == 0 and chat_url and chat_url.startswith("https://gemini.google.com"):
+                        await current_bot.goto_specific_chat(page, chat_url)
+
+                    await current_bot.send_prompt(page, current_gemini_prompt)
+
+                    # Poll for Gemini Output
+                    gemini_output_captured = {"text": ""}
+                    async def gemini_poll_cb(text):
+                        if text and text != gemini_output_captured["text"]:
+                            gemini_output_captured["text"] = text
+                            if stream_queue: await stream_queue.put(f"data: {json.dumps({'step': step_id, 'status': 'Gemini Output', 'message': text})}\n\n")
+
+                    await current_bot.wait_for_response(page, timeout=300000, poll_callback=gemini_poll_cb)
+                    gemini_response = await current_bot.get_last_response(page)
+
+                    if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Gemini Output', 'message': gemini_response})}\n\n"
+
+                    # If Gemini outputs something indicating it's completely done, we could break early
+                    if "FINAL_REVIEW_COMPLETE" in gemini_response:
+                        loop_result = gemini_response
+                        break
+
+                    # 2. Prompt Jules
+                    if not jules_url:
+                        loop_result = f"Error: Jules/Repository URL not provided. Gemini generated: {gemini_response}"
+                        break
+
+                    if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Jules Working', 'message': f'Iteration {i+1}: Sent to Jules. Waiting for completion...'})}\n\n"
+
+                    # Launch a separate isolated page for Jules if possible, or just use the current context to open a new tab
+                    jules_page = await current_bot.context.new_page()
+                    jules_response = ""
+                    try:
+                        jules_response = await current_bot.prompt_jules_and_poll(jules_page, jules_url, gemini_response)
+                        if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Jules Output', 'message': jules_response})}\n\n"
+                    except Exception as e:
+                        jules_response = f"Jules Error: {str(e)}"
+                        if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Jules Error', 'message': jules_response})}\n\n"
+                    finally:
+                        await jules_page.close()
+
+                    # 3. Next iteration prompt
+                    current_gemini_prompt = f"Jules has finished with the following output/status: {jules_response}\n\nPlease review this. If everything is correct and no further coding is needed, reply with 'FINAL_REVIEW_COMPLETE'. Otherwise, provide the next set of coding instructions for Jules."
+                    loop_result = f"Latest Jules Output: {jules_response}\nLatest Gemini Review: {gemini_response}"
+
+                results[str(step_id)] = loop_result
+                if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Complete', 'result': loop_result, 'show_result': show_result})}\n\n"
+                index += 1
+                continue
+
             elif step_type == 'scraper':
                 # Web Scraper Node
                 url_to_scrape = prompt_template.strip()

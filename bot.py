@@ -203,6 +203,56 @@ class GeminiBot:
         except Exception as e:
             raise Exception(f"Timeout: Gemini did not finish responding within {timeout/1000} seconds. Error: {e}")
 
+    async def prompt_jules_and_poll(self, page: Page, target_url: str, prompt: str) -> str:
+        """
+        Navigates to the Jules interface, submits a prompt, and polls for completion.
+        Returns the final extracted result/branch link.
+        """
+        try:
+            logging.info(f"Navigating to Jules target URL: {target_url}")
+            await page.goto(target_url, wait_until="domcontentloaded")
+
+            # Find Jules input box
+            input_box = page.locator("textarea").first
+            await input_box.wait_for(state="visible", timeout=20000)
+            await input_box.fill(prompt)
+            logging.info("Entered prompt into Jules.")
+
+            # Press enter to submit
+            await page.keyboard.press("Enter")
+            logging.info("Submitted prompt to Jules.")
+
+            # Polling loop
+            logging.info("Polling Jules for 'Ready for review'...")
+            max_polls = 60 # 10 minutes max (60 * 10s)
+            poll_count = 0
+
+            while poll_count < max_polls:
+                await asyncio.sleep(10)
+                poll_count += 1
+
+                # Check for completion text
+                if await page.locator("text='Ready for review'").is_visible():
+                    logging.info("Jules reported 'Ready for review'.")
+
+                    # Extract the latest response from Jules
+                    # We assume it's in the DOM, potentially as a link or last text block
+                    # A robust generic fallback:
+                    body_text = await page.inner_text("body")
+                    # Try to extract a branch link if present
+                    import re
+                    match = re.search(r'(https://github\.com/\S+/tree/\S+)', body_text)
+                    if match:
+                        return f"Jules finished. Branch link: {match.group(1)}"
+                    return "Jules finished successfully. Status: Ready for review."
+
+            raise Exception("Timeout waiting for Jules to complete task.")
+
+        except Exception as e:
+            error_msg = f"Error during Jules agent loop: {e}"
+            logging.error(error_msg)
+            raise Exception(error_msg)
+
     async def get_last_response(self, page: Page) -> str:
         """
         Extracts the generated response text from the DOM.
