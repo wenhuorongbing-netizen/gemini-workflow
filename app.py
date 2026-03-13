@@ -1,12 +1,28 @@
-from fastapi import FastAPI, Request, BackgroundTasks
+from fastapi import FastAPI, Request, BackgroundTasks, HTTPException
 from fastapi.templating import Jinja2Templates
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 import asyncio
 import logging
 from bot import GeminiBot
 import json
+import os
 
 app = FastAPI()
+
+EPICS_FILE = 'epics.json'
+
+def load_epics():
+    if os.path.exists(EPICS_FILE):
+        try:
+            with open(EPICS_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except:
+            return {}
+    return {}
+
+def save_epics(data):
+    with open(EPICS_FILE, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
 templates = Jinja2Templates(directory="templates")
 logging.basicConfig(
     level=logging.INFO,
@@ -49,6 +65,48 @@ async def get_bot():
             raise Exception("Failed to initialize bot. Ensure Chrome profile path is valid.")
     return bot
 
+@app.get("/api/workspaces")
+async def get_workspaces():
+    epics = load_epics()
+    # Return minimal info for sidebar
+    workspaces = []
+    for ws_id, data in epics.items():
+        workspaces.append({"id": ws_id, "name": data.get("name", "Unnamed Workspace")})
+    return JSONResponse(workspaces)
+
+@app.get("/api/workspaces/{workspace_id}")
+async def get_workspace(workspace_id: str):
+    epics = load_epics()
+    if workspace_id not in epics:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    return JSONResponse(epics[workspace_id])
+
+@app.post("/api/workspaces/{workspace_id}")
+async def save_workspace(workspace_id: str, request: Request):
+    data = await request.json()
+    epics = load_epics()
+
+    if workspace_id not in epics:
+        epics[workspace_id] = {"name": data.get("name", "New Workspace"), "steps": [], "results": {}}
+
+    if "name" in data:
+        epics[workspace_id]["name"] = data["name"]
+    if "steps" in data:
+        epics[workspace_id]["steps"] = data["steps"]
+    if "results" in data:
+        epics[workspace_id]["results"] = data["results"]
+
+    save_epics(epics)
+    return JSONResponse({"status": "success"})
+
+@app.delete("/api/workspaces/{workspace_id}")
+async def delete_workspace(workspace_id: str):
+    epics = load_epics()
+    if workspace_id in epics:
+        del epics[workspace_id]
+        save_epics(epics)
+    return JSONResponse({"status": "deleted"})
+
 @app.get("/")
 async def index(request: Request):
     return templates.TemplateResponse("index.html", {"request": request})
@@ -68,6 +126,7 @@ async def execute_workflow(request: Request):
         return StreamingResponse(error_stream(f"Invalid JSON payload: {str(e)}"), media_type="text/event-stream")
 
     steps = data.get('steps', [])
+    workspace_id = data.get('workspace_id')
 
     if not steps:
         return StreamingResponse(error_stream("No steps provided in workflow."), media_type="text/event-stream")
@@ -337,6 +396,14 @@ async def execute_workflow(request: Request):
                     if not step_success:
                         # If a critical error occurs and all retries fail, break the workflow to avoid cascaded failures
                         break
+
+
+            # Save results to the workspace if provided
+            if workspace_id:
+                epics = load_epics()
+                if workspace_id in epics:
+                    epics[workspace_id]["results"] = results
+                    save_epics(epics)
 
             yield f"data: {json.dumps({'status': 'Workflow Finished', 'results': results})}\n\n"
         finally:

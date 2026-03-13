@@ -1,0 +1,30 @@
+{
+  "1773373020964": {
+    "name": "My Test Workspace",
+    "steps": [
+      {
+        "prompt": "",
+        "new_chat": false,
+        "type": "standard",
+        "chat_url": "",
+        "show_result": true,
+        "dash_column": "primary"
+      }
+    ],
+    "results": {}
+  },
+  "1773373034382": {
+    "name": "My Test Workspace",
+    "steps": [
+      {
+        "prompt": "",
+        "new_chat": false,
+        "type": "standard",
+        "chat_url": "",
+        "show_result": true,
+        "dash_column": "primary"
+      }
+    ],
+    "results": {}
+  }
+}
