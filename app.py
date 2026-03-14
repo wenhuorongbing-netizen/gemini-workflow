@@ -586,8 +586,17 @@ async def run_workflow_engine(steps, workspace_id, stream_queue=None, profile_id
                             # Context Recovery Logic
                             if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Jules Error', 'message': '[FATAL] Memory Crash. Hard-restarting JulesBot context...', 'screen': 'right'})}\n\n"
                             await jules_bot.quit()
-                            # It will auto-initialize on next create_new_page in the next loop iteration
-                            jules_page = None
+
+                            # Initialize fresh bot
+                            jules_bot = JulesBot(profile_id=profile_id)
+                            jules_page = await jules_bot.create_new_page()
+
+                            # Re-inject system_role and accumulated_context
+                            if system_prompt:
+                                current_gemini_prompt = f"System Instructions / Persona:\n{system_prompt}\n\nWe are continuing a task after a crash. Here is the context so far:\n{accumulated_context}\n\nResume the review and next steps."
+                            else:
+                                current_gemini_prompt = f"We are continuing a task after a crash. Here is the context so far:\n{accumulated_context}\n\nResume the review and next steps."
+
                             jules_response = "Jules experienced a system crash and was rebooted. Please resend the instructions."
                         else:
                             jules_response = f"Jules Error: {error_msg}"

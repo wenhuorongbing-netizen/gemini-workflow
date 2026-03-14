@@ -75,9 +75,24 @@ const ScraperNode = ({ data }: any) => (
   <BaseNode data={data} icon={Globe} title="Web Scraper" content={data.url || "https://..."} bgColor="bg-amber-900" borderColor="border-amber-700" />
 );
 
-const StateNode = ({ data }: any) => (
-  <BaseNode data={data} icon={Database} title="Global State" content={`${data.varName || "VAR_NAME"} = ${data.defaultValue || "..."}`} bgColor="bg-slate-700" borderColor="border-slate-500" />
-);
+const StateNode = ({ data }: any) => {
+  const statusClasses = data?.executionStatus === 'running' ? "ring-2 ring-blue-500" : data?.executionStatus === 'success' ? "ring-2 ring-emerald-500" : "";
+  return (
+    <div className={`w-[280px] rounded-lg shadow-lg border-2 border-slate-500 bg-slate-700 ${statusClasses} transition-all duration-300 overflow-hidden text-slate-50 flex flex-col`}>
+      <Handle type="target" position={Position.Top} className="w-3 h-3 !bg-slate-300" />
+      <div className="px-4 py-2 border-b border-slate-500 flex justify-between items-center font-semibold tracking-wide bg-opacity-20 bg-black">
+        <div className="flex items-center gap-2">
+            <Database size={18} />
+            <span>Global State</span>
+        </div>
+      </div>
+      <div className="p-4 flex-1 text-sm bg-slate-900/50">
+        <div className="text-slate-300 truncate">{`${data.varName || "VAR_NAME"} = ${data.defaultValue || "..."}`}</div>
+      </div>
+      <Handle type="source" position={Position.Bottom} className="w-3 h-3 !bg-slate-300" />
+    </div>
+  );
+};
 
 const AgentLoopNode = ({ data }: any) => (
   <BaseNode data={data} icon={Repeat} title="Agentic Loop" content={`Target: ${data.url || "None"}`} bgColor="bg-purple-900" borderColor="border-purple-700" />
@@ -165,6 +180,188 @@ function compileNodesToSteps(nodes: Node[], edges: Edge[]) {
 
 // --- Main App Shell ---
 
+
+const PropertiesPanel = ({ selectedNodeId, nodes, updateNodeData, isPlaybackMode, setSelectedNodeId, playbackRun }: any) => {
+  return (
+    <aside className="absolute top-0 right-0 w-[300px] h-full bg-white border-l border-slate-200 shadow-xl z-20 flex flex-col PropertiesPanel">
+      <div className="p-4 border-b border-slate-200 bg-slate-50 flex justify-between items-center">
+        <h3 className="font-bold text-slate-800">Node Properties</h3>
+        <button onClick={() => setSelectedNodeId(null)} className="text-slate-400 hover:text-slate-600">✕</button>
+      </div>
+      <div className="p-4 flex-1 overflow-y-auto">
+        {nodes.filter((n: any) => n.id === selectedNodeId).map((node: any) => (
+          <div key={node.id} className="space-y-4">
+            <div>
+              <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Node Type</label>
+              <div className="px-3 py-1.5 bg-slate-100 rounded text-sm text-slate-700 font-medium capitalize">{node.type?.replace('_', ' ')}</div>
+            </div>
+
+            {node.type === 'gemini' && (
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">System Role (System Prompt)</label>
+                  <textarea
+                    className="w-full h-20 px-3 py-2 border border-slate-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                    value={node.data.systemPrompt as string || ''}
+                    onChange={(e) => updateNodeData(node.id, { systemPrompt: e.target.value })}
+                    disabled={isPlaybackMode}
+                    placeholder="e.g., You are a senior code reviewer..."
+                  />
+                </div>
+                <div>
+                  <div className="flex justify-between items-center mb-1">
+                    <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider">User Prompt</label>
+
+                    <div className="relative group">
+                      <button className="text-xs bg-slate-200 hover:bg-blue-100 text-blue-700 px-2 py-0.5 rounded transition InsertVariableBtn">
+                        Insert Variable
+                      </button>
+                      <div className="absolute right-0 top-full mt-1 w-48 bg-white border border-slate-200 rounded-md shadow-xl opacity-0 group-hover:opacity-100 pointer-events-none group-hover:pointer-events-auto transition-opacity z-50 p-1 flex flex-col gap-1 max-h-48 overflow-y-auto">
+                        {nodes.filter((n: any) => n.id !== node.id).map((n: any) => (
+                          <button
+                            key={n.id}
+                            onClick={() => {
+                              const newVal = (node.data.prompt || '') + ` {{${n.id}}}`;
+                              updateNodeData(node.id, { prompt: newVal });
+                            }}
+                            className="text-left text-xs px-2 py-1.5 hover:bg-slate-100 rounded text-slate-700 truncate"
+                            disabled={isPlaybackMode}
+                          >
+                            <span className="font-semibold">{n.type}</span>: {String(n.data.prompt || n.data.url || 'Node')}
+                          </button>
+                        ))}
+                        {nodes.length <= 1 && <div className="text-xs text-slate-400 p-2 text-center">No other nodes</div>}
+                      </div>
+                    </div>
+                  </div>
+                  <textarea
+                    className="w-full h-32 px-3 py-2 border border-slate-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                    value={node.data.prompt as string || ''}
+                    onChange={(e) => updateNodeData(node.id, { prompt: e.target.value })}
+                    disabled={isPlaybackMode}
+                    placeholder="Enter AI prompt... Use {{NODE_ID}} to inject previous outputs."
+                  />
+                </div>
+              </div>
+            )}
+
+            {node.type === 'scraper' && (
+              <div>
+                <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Target URL</label>
+                <input
+                  type="text"
+                  className="w-full px-3 py-2 border border-slate-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-amber-500 focus:border-amber-500"
+                  value={node.data.url as string || ''}
+                  onChange={(e) => updateNodeData(node.id, { url: e.target.value })}
+                    disabled={isPlaybackMode}
+                  placeholder="https://..."
+                />
+              </div>
+            )}
+
+            {node.type === 'agentic_loop' && (
+              <>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Repository/Target URL</label>
+                  <input
+                    type="text"
+                    className="w-full px-3 py-2 border border-slate-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-purple-500"
+                    value={node.data.url as string || ''}
+                    onChange={(e) => updateNodeData(node.id, { url: e.target.value })}
+                    disabled={isPlaybackMode}
+                    placeholder="https://github.com/..."
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Max Iterations</label>
+                  <input
+                    type="number"
+                    min="1"
+                    max="10"
+                    className="w-full px-3 py-2 border border-slate-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-purple-500"
+                    value={node.data.max_iterations as number || 3}
+                    onChange={(e) => updateNodeData(node.id, { max_iterations: parseInt(e.target.value, 10) || 3 })}
+                    disabled={isPlaybackMode}
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Context Reset Frequency</label>
+                  <input
+                    type="number"
+                    min="1"
+                    max="10"
+                    className="w-full px-3 py-2 border border-slate-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-purple-500"
+                    value={node.data.reset_threshold as number || 3}
+                    onChange={(e) => updateNodeData(node.id, { reset_threshold: parseInt(e.target.value, 10) || 3 })}
+                    disabled={isPlaybackMode}
+                  />
+                  <p className="text-[10px] text-slate-500 mt-1">Clears DOM every N steps to prevent crashing.</p>
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Stop Sequence</label>
+                  <input
+                    type="text"
+                    className="w-full px-3 py-2 border border-slate-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-rose-500 focus:border-rose-500"
+                    value={node.data.stop_sequence as string || 'FINAL_REVIEW_COMPLETE'}
+                    onChange={(e) => updateNodeData(node.id, { stop_sequence: e.target.value })}
+                    disabled={isPlaybackMode}
+                    placeholder="e.g., DONE"
+                  />
+                  <p className="text-[10px] text-slate-500 mt-1">If Gemini outputs this string, the loop finishes immediately.</p>
+                </div>
+              </>
+            )}
+
+            {node.type === 'state' && (
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Variable Name</label>
+                  <input
+                    type="text"
+                    className="w-full px-3 py-2 border border-slate-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-slate-500 focus:border-slate-500"
+                    value={node.data.varName as string || ''}
+                    onChange={(e) => updateNodeData(node.id, { varName: e.target.value.toUpperCase().replace(/[^A-Z0-9_]/g, '') })}
+                    disabled={isPlaybackMode}
+                    placeholder="e.g., USER_PREFS"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Default Value</label>
+                  <textarea
+                    className="w-full h-24 px-3 py-2 border border-slate-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-slate-500 focus:border-slate-500"
+                    value={node.data.defaultValue as string || ''}
+                    onChange={(e) => updateNodeData(node.id, { defaultValue: e.target.value })}
+                    disabled={isPlaybackMode}
+                    placeholder="Enter default text or JSON..."
+                  />
+                </div>
+                <div className="text-xs text-slate-500 italic">
+                  Use {`{{GLOBAL_VAR_NAME}}`} in any prompt downstream to inject this value.
+                </div>
+              </div>
+            )}
+
+            {node.type === 'trigger' && (
+              <div className="text-sm text-slate-500 italic">
+                Trigger nodes are the starting point of the execution graph. No configuration needed.
+              </div>
+            )}
+
+            {isPlaybackMode && playbackRun && playbackRun.parsedResults && playbackRun.parsedResults[node.id] && (
+                <div className="mt-6 border-t border-slate-200 pt-4">
+                    <label className="block text-xs font-semibold text-emerald-600 uppercase tracking-wider mb-2">Snapshot Output Result</label>
+                    <div className="p-3 bg-slate-900 text-slate-300 text-xs rounded-md overflow-x-auto whitespace-pre-wrap font-mono max-h-96 overflow-y-auto">
+                        {playbackRun.parsedResults[node.id]}
+                    </div>
+                </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </aside>
+  );
+};
+
 export default function AppShell() {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [selectedWorkspace, setSelectedWorkspace] = useState<Workspace | null>(null);
@@ -201,11 +398,15 @@ export default function AppShell() {
     if (!selectedWorkspace || isLoading) return;
 
     const timeoutId = setTimeout(() => {
-      saveWorkflowSilent();
-    }, 2000);
+        fetch(`/api/workflows/save`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ workspaceId: selectedWorkspace.id, nodes, edges })
+        }).catch(e => console.error("Silent auto-save failed", e));
+    }, 1000);
 
     return () => clearTimeout(timeoutId);
-  }, [nodes, edges, selectedWorkspace]);
+  }, [nodes, edges, selectedWorkspace, isLoading]);
 
   // Animated Edges Logic
   useEffect(() => {
@@ -407,7 +608,7 @@ export default function AppShell() {
             const events = buffer.split('\n\n');
             buffer = events.pop() || "";
 
-            for (let evt of events) {
+            for (const evt of events) {
                 if (evt.startsWith('data: ')) {
                     const dataStr = evt.substring(6);
                     if (!dataStr) continue;
@@ -657,184 +858,16 @@ export default function AppShell() {
                  </div>
              )}
 
-             {/* Properties Panel */}
+             {/* Properties Panel Component */}
              {selectedNodeId && (
-               <div className="absolute top-0 right-0 w-[300px] h-full bg-white border-l border-slate-200 shadow-xl z-20 flex flex-col">
-                 <div className="p-4 border-b border-slate-200 bg-slate-50 flex justify-between items-center">
-                   <h3 className="font-bold text-slate-800">Node Properties</h3>
-                   <button onClick={() => setSelectedNodeId(null)} className="text-slate-400 hover:text-slate-600">✕</button>
-                 </div>
-                 <div className="p-4 flex-1 overflow-y-auto">
-                   {nodes.filter(n => n.id === selectedNodeId).map(node => (
-                     <div key={node.id} className="space-y-4">
-                       <div>
-                         <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Node Type</label>
-                         <div className="px-3 py-1.5 bg-slate-100 rounded text-sm text-slate-700 font-medium capitalize">{node.type?.replace('_', ' ')}</div>
-                       </div>
-
-                       {node.type === 'gemini' && (
-                         <div className="space-y-4">
-                           <div>
-                             <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">System Prompt (Persona)</label>
-                             <textarea
-                               className="w-full h-20 px-3 py-2 border border-slate-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                               value={node.data.systemPrompt as string || ''}
-                               onChange={(e) => updateNodeData(node.id, { systemPrompt: e.target.value })}
-                               disabled={isPlaybackMode}
-                               placeholder="e.g., You are a senior code reviewer..."
-                             />
-                           </div>
-                           <div>
-                             <div className="flex justify-between items-center mb-1">
-                               <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider">User Prompt</label>
-
-                               <div className="relative group">
-                                 <button className="text-xs bg-slate-200 hover:bg-blue-100 text-blue-700 px-2 py-0.5 rounded transition">
-                                   + Insert Variable
-                                 </button>
-                                 <div className="absolute right-0 top-full mt-1 w-48 bg-white border border-slate-200 rounded-md shadow-xl opacity-0 group-hover:opacity-100 pointer-events-none group-hover:pointer-events-auto transition-opacity z-50 p-1 flex flex-col gap-1 max-h-48 overflow-y-auto">
-                                   {nodes.filter(n => n.id !== node.id).map(n => (
-                                     <button
-                                       key={n.id}
-                                       onClick={() => {
-                                         const newVal = (node.data.prompt || '') + ` {{${n.id}}}`;
-                                         updateNodeData(node.id, { prompt: newVal });
-                                       }}
-                                       className="text-left text-xs px-2 py-1.5 hover:bg-slate-100 rounded text-slate-700 truncate"
-                                       disabled={isPlaybackMode}
-                                     >
-                                       <span className="font-semibold">{n.type}</span>: {String(n.data.prompt || n.data.url || 'Node')}
-                                     </button>
-                                   ))}
-                                   {nodes.length <= 1 && <div className="text-xs text-slate-400 p-2 text-center">No other nodes</div>}
-                                 </div>
-                               </div>
-                             </div>
-                             <textarea
-                               className="w-full h-32 px-3 py-2 border border-slate-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                               value={node.data.prompt as string || ''}
-                               onChange={(e) => updateNodeData(node.id, { prompt: e.target.value })}
-                               disabled={isPlaybackMode}
-                               placeholder="Enter AI prompt... Use {{NODE_ID}} to inject previous outputs."
-                             />
-                           </div>
-                         </div>
-                       )}
-
-                       {node.type === 'scraper' && (
-                         <div>
-                           <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Target URL</label>
-                           <input
-                             type="text"
-                             className="w-full px-3 py-2 border border-slate-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-amber-500 focus:border-amber-500"
-                             value={node.data.url as string || ''}
-                             onChange={(e) => updateNodeData(node.id, { url: e.target.value })}
-                               disabled={isPlaybackMode}
-                             placeholder="https://..."
-                           />
-                         </div>
-                       )}
-
-                       {node.type === 'agentic_loop' && (
-                         <>
-                           <div>
-                             <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Repository/Target URL</label>
-                             <input
-                               type="text"
-                               className="w-full px-3 py-2 border border-slate-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-purple-500"
-                               value={node.data.url as string || ''}
-                               onChange={(e) => updateNodeData(node.id, { url: e.target.value })}
-                               disabled={isPlaybackMode}
-                               placeholder="https://github.com/..."
-                             />
-                           </div>
-                           <div>
-                             <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Max Iterations</label>
-                             <input
-                               type="number"
-                               min="1"
-                               max="10"
-                               className="w-full px-3 py-2 border border-slate-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-purple-500"
-                               value={node.data.max_iterations as number || 3}
-                               onChange={(e) => updateNodeData(node.id, { max_iterations: parseInt(e.target.value, 10) || 3 })}
-                               disabled={isPlaybackMode}
-                             />
-                           </div>
-                           <div>
-                             <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Context Reset Frequency</label>
-                             <input
-                               type="number"
-                               min="1"
-                               max="10"
-                               className="w-full px-3 py-2 border border-slate-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-purple-500"
-                               value={node.data.reset_threshold as number || 3}
-                               onChange={(e) => updateNodeData(node.id, { reset_threshold: parseInt(e.target.value, 10) || 3 })}
-                               disabled={isPlaybackMode}
-                             />
-                             <p className="text-[10px] text-slate-500 mt-1">Clears DOM every N steps to prevent crashing.</p>
-                           </div>
-                           <div>
-                             <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Stop Sequence</label>
-                             <input
-                               type="text"
-                               className="w-full px-3 py-2 border border-slate-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-rose-500 focus:border-rose-500"
-                               value={node.data.stop_sequence as string || 'FINAL_REVIEW_COMPLETE'}
-                               onChange={(e) => updateNodeData(node.id, { stop_sequence: e.target.value })}
-                               disabled={isPlaybackMode}
-                               placeholder="e.g., DONE"
-                             />
-                             <p className="text-[10px] text-slate-500 mt-1">If Gemini outputs this string, the loop finishes immediately.</p>
-                           </div>
-                         </>
-                       )}
-
-                       {node.type === 'state' && (
-                         <div className="space-y-4">
-                           <div>
-                             <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Variable Name</label>
-                             <input
-                               type="text"
-                               className="w-full px-3 py-2 border border-slate-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-slate-500 focus:border-slate-500"
-                               value={node.data.varName as string || ''}
-                               onChange={(e) => updateNodeData(node.id, { varName: e.target.value.toUpperCase().replace(/[^A-Z0-9_]/g, '') })}
-                               disabled={isPlaybackMode}
-                               placeholder="e.g., USER_PREFS"
-                             />
-                           </div>
-                           <div>
-                             <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Default Value</label>
-                             <textarea
-                               className="w-full h-24 px-3 py-2 border border-slate-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-slate-500 focus:border-slate-500"
-                               value={node.data.defaultValue as string || ''}
-                               onChange={(e) => updateNodeData(node.id, { defaultValue: e.target.value })}
-                               disabled={isPlaybackMode}
-                               placeholder="Enter default text or JSON..."
-                             />
-                           </div>
-                           <div className="text-xs text-slate-500 italic">
-                             Use {`{{GLOBAL_VAR_NAME}}`} in any prompt downstream to inject this value.
-                           </div>
-                         </div>
-                       )}
-
-                       {node.type === 'trigger' && (
-                         <div className="text-sm text-slate-500 italic">
-                           Trigger nodes are the starting point of the execution graph. No configuration needed.
-                         </div>
-                       )}
-
-                       {isPlaybackMode && playbackRun && playbackRun.parsedResults && playbackRun.parsedResults[node.id] && (
-                           <div className="mt-6 border-t border-slate-200 pt-4">
-                               <label className="block text-xs font-semibold text-emerald-600 uppercase tracking-wider mb-2">Snapshot Output Result</label>
-                               <div className="p-3 bg-slate-900 text-slate-300 text-xs rounded-md overflow-x-auto whitespace-pre-wrap font-mono max-h-96 overflow-y-auto">
-                                   {playbackRun.parsedResults[node.id]}
-                               </div>
-                           </div>
-                       )}
-                     </div>
-                   ))}
-                 </div>
-               </div>
+                <PropertiesPanel
+                    selectedNodeId={selectedNodeId}
+                    nodes={nodes}
+                    updateNodeData={updateNodeData}
+                    isPlaybackMode={isPlaybackMode}
+                    setSelectedNodeId={setSelectedNodeId}
+                    playbackRun={playbackRun}
+                />
              )}
             </>
           ) : activeTab === "runs" ? (
