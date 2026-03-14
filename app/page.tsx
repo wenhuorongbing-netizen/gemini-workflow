@@ -397,8 +397,34 @@ const PropertiesPanel = ({ selectedNodeId, nodes, updateNodeData, isPlaybackMode
             )}
 
             {node.type === 'trigger' && (
-              <div className="text-sm text-slate-500 italic">
-                Trigger nodes are the starting point of the execution graph. No configuration needed.
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-400 mb-1">Trigger Type</label>
+                  <select
+                    className="w-full bg-slate-900 border border-slate-700 rounded-md p-2 text-sm text-slate-300"
+                    value={node.data.triggerType || 'manual'}
+                    onChange={(e) => updateNodeData(node.id, { triggerType: e.target.value })}
+                  >
+                    <option value="manual">Manual Execution</option>
+                    <option value="cron">Scheduled (Cron)</option>
+                  </select>
+                </div>
+                {node.data.triggerType === 'cron' && (
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-400 mb-1">Cron Expression</label>
+                    <input
+                      type="text"
+                      className="w-full bg-slate-900 border border-slate-700 rounded-md p-2 text-sm text-slate-300 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none"
+                      value={(node.data.cron as string) || ""}
+                      onChange={(e) => updateNodeData(node.id, { cron: e.target.value })}
+                      placeholder="e.g., */5 * * * *"
+                    />
+                    <div className="text-xs text-slate-500 mt-1 mt-2">
+                        Use standard cron format. e.g. "0 0 * * *" for daily at midnight.
+                        Saves to the backend automatically.
+                    </div>
+                  </div>
+                )}
               </div>
             )}
 
@@ -649,94 +675,105 @@ export default function AppShell() {
 
         if (!response.ok) {
            const err = await response.json();
-           alert("Failed to start workflow: " + (err.error || "Unknown error"));
+           alert("Failed to queue workflow: " + (err.error || "Unknown error"));
            setIsExecuting(false);
            return;
         }
 
-        const reader = response.body?.getReader();
-        if (!reader) throw new Error("No response body reader.");
-        const decoder = new TextDecoder("utf-8");
-        let buffer = "";
+        const data = await response.json();
+        const taskId = data.task_id;
 
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
+        if (!taskId) {
+            throw new Error("No task ID returned");
+        }
 
-            buffer += decoder.decode(value, { stream: true });
-            const events = buffer.split('\n\n');
-            buffer = events.pop() || "";
+        const eventSource = new EventSource(`http://127.0.0.1:8000/api/logs/${taskId}`);
 
-            for (const evt of events) {
-                if (evt.startsWith('data: ')) {
-                    const dataStr = evt.substring(6);
-                    if (!dataStr) continue;
+        eventSource.onmessage = async (event) => {
+            try {
+                if (event.data === "__DONE__") {
+                    eventSource.close();
+                    setIsExecuting(false);
+                    return;
+                }
+                const dataStr = event.data;
+                const data = JSON.parse(dataStr);
 
-                    try {
-                        const data = JSON.parse(dataStr);
+                if (data.error) {
+                    console.error("Execution error:", data.error);
+                    setLogs(prev => [...prev, { status: "Error", message: data.error }]);
+                    setIsExecuting(false);
+                    setNodes(nds => nds.map(n => ({ ...n, data: { ...n.data, executionStatus: 'error' } })));
+                    eventSource.close();
+                    return;
+                }
 
-                        if (data.status) {
-                            setLogs(prev => [...prev, { status: data.status, message: data.message || data.result || "" }]);
-                        }
+                if (data.status) {
+                    setLogs(prev => [...prev, { status: data.status, message: data.message || data.result || "" }]);
+                }
 
-                        if (data.step) {
-                            // Map step ID (1-based index) to React Flow node ID
-                            const targetNodeId = nodeOrder[data.step - 1];
-                            if (targetNodeId) {
-                                let statusToSet = 'running';
-                                if (data.status === 'Complete') statusToSet = 'success';
-                                if (data.status === 'Error' || data.status === 'Canceled') statusToSet = 'error';
+                if (data.step) {
+                    // Map step ID (1-based index) to React Flow node ID
+                    const targetNodeId = nodeOrder[data.step - 1];
+                    if (targetNodeId) {
+                        let statusToSet = 'running';
+                        if (data.status === 'Complete') statusToSet = 'success';
+                        if (data.status === 'Error' || data.status === 'Canceled') statusToSet = 'error';
 
-                                setNodes(nds =>
-                                    nds.map(n => {
-                                        if (n.id === targetNodeId) {
-                                            // Only upgrade status (don't downgrade success/error back to running)
-                                            const currentStatus = n.data.executionStatus;
-                                            if (currentStatus === 'success' || currentStatus === 'error') {
-                                                return n;
-                                            }
-                                            return { ...n, data: { ...n.data, executionStatus: statusToSet } };
-                                        }
+                        setNodes(nds =>
+                            nds.map(n => {
+                                if (n.id === targetNodeId) {
+                                    // Only upgrade status (don't downgrade success/error back to running)
+                                    const currentStatus = n.data.executionStatus;
+                                    if (currentStatus === 'success' || currentStatus === 'error') {
                                         return n;
-                                    })
-                                );
-                            }
-                        }
-
-                        if (data.status === 'Workflow Finished' || data.status === 'Error' || data.status === 'Canceled') {
-                            setIsExecuting(false);
-
-                            // Save to Execution History
-                            if (selectedWorkspace) {
-                                // Re-map results to node IDs based on step numbers if they aren't already
-                                // app.py returns strings matching past_id. Our past_id logic uses `step.id`, which we set to `nodeOrder[index]`.
-                                // Wait, `app.py` `step_id` is now literally `step.get('id')` which IS the React Flow Node ID.
-                                // So `data.results` dictionary has keys that are exactly `node.id`.
-                                await fetch(`/api/runs/${selectedWorkspace.id}`, {
-                                    method: 'POST',
-                                    headers: { 'Content-Type': 'application/json' },
-                                    body: JSON.stringify({
-                                        status: data.status,
-                                        logs: logs,
-                                        results: data.results || {},
-                                        nodes: nodes,
-                                        edges: edges
-                                    })
-                                });
-                                // Refresh history
-                                fetchWorkflowData(selectedWorkspace.id);
-                            }
-                        }
-                    } catch (e) {
-                        console.error("Error parsing chunk:", e);
+                                    }
+                                    return { ...n, data: { ...n.data, executionStatus: statusToSet, result: data.result || data.partial_result || n.data.result } };
+                                }
+                                return n;
+                            })
+                        );
                     }
                 }
+
+                if (data.status === 'Workflow Finished' || data.status === 'Error' || data.status === 'Canceled') {
+                    setIsExecuting(false);
+
+                    // Save to Execution History
+                    if (selectedWorkspace) {
+                        await fetch(`/api/runs/${selectedWorkspace.id}`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                status: data.status,
+                                logs: logs,
+                                results: data.results || {},
+                                nodes: nodes,
+                                edges: edges
+                            })
+                        });
+                        // Refresh history
+                        fetchWorkflowData(selectedWorkspace.id);
+                    }
+                    eventSource.close();
+                }
+            } catch (e) {
+                console.error("Error parsing JSON:", e, event.data);
             }
-        }
+        };
+
+        eventSource.onerror = (err) => {
+            console.error("EventSource failed:", err);
+            setIsExecuting(false);
+            setNodes(nds => nds.map(n => ({ ...n, data: { ...n.data, executionStatus: 'error' } })));
+            eventSource.close();
+        };
+
       } catch (error: any) {
-        alert("Network Error: " + error.message);
-      } finally {
-        setIsExecuting(false);
+          console.error("Execution request failed:", error);
+          alert("Network Error: " + error.message);
+          setIsExecuting(false);
+          setNodes(nds => nds.map(n => ({ ...n, data: { ...n.data, executionStatus: 'error' } })));
       }
   };
 

@@ -377,6 +377,7 @@ async def index(request: Request):
     return templates.TemplateResponse("index.html", {"request": request})
 
 import uuid
+task_streams = {}
 
 async def run_workflow_engine(steps, workspace_id, stream_queue=None, profile_id="1", run_variables=None, global_state=None):
     if run_variables is None:
@@ -448,7 +449,11 @@ async def run_workflow_engine(steps, workspace_id, stream_queue=None, profile_id
                 continue
 
             elif step_type == 'approval':
-                prev_result = results.get(str(step_id - 1), "")
+                try:
+                    prev_step_id = str(int(step_id) - 1)
+                except ValueError:
+                    prev_step_id = ""
+                prev_result = results.get(prev_step_id, "")
 
                 approval_events[run_id] = {
                     'event': asyncio.Event(),
@@ -753,7 +758,6 @@ async def run_workflow_engine(steps, workspace_id, stream_queue=None, profile_id
                     tag = f"{{{{OUTPUT_{past_id}}}}}"
                     if tag in final_payload_str:
                         # Ensure proper escaping for JSON payloads if injecting directly
-                        import json
                         escaped_output = json.dumps(past_output)[1:-1] # Strip quotes but keep escapes
                         final_payload_str = final_payload_str.replace(tag, escaped_output)
 
@@ -783,7 +787,11 @@ async def run_workflow_engine(steps, workspace_id, stream_queue=None, profile_id
                     if tag in final_script:
                         final_script = final_script.replace(tag, past_output)
 
-                prev_input = results.get(str(step_id - 1), "")
+                try:
+                    prev_step_id = str(int(step_id) - 1)
+                except ValueError:
+                    prev_step_id = ""
+                prev_input = results.get(prev_step_id, "")
 
                 local_vars = {'input': prev_input, 'output': ''}
                 try:
@@ -1130,7 +1138,7 @@ async def run_workflow_engine(steps, workspace_id, stream_queue=None, profile_id
 
         # History and persistence is now handled by the Next.js database frontend.
         # We operate purely statelessly here as an execution engine.
-        if stream_queue: yield f"data: {json.dumps({{'status': 'Workflow Finished', 'results': results, 'timestamp': str(datetime.datetime.now())}})}\n\n"
+        if stream_queue: yield f"data: {json.dumps({'status': 'Workflow Finished', 'results': results, 'timestamp': str(datetime.datetime.now())})}\n\n"
     finally:
         if page:
             await page.close()
@@ -1145,19 +1153,27 @@ async def stop_workflow():
         return JSONResponse({"status": "stopping"})
     return JSONResponse({"status": "no active workflow"})
 
+async def execution_wrapper(task_id, steps, workspace_id, profile_id, run_variables, global_state):
+    stream_queue = asyncio.Queue()
+    try:
+        await bot_semaphore.acquire()
+        if cancel_event:
+            cancel_event.clear()
+
+        async for event in run_workflow_engine(steps, workspace_id, stream_queue, profile_id, run_variables, global_state):
+            await task_streams[task_id].put(event)
+    except Exception as e:
+        await task_streams[task_id].put(f"data: {json.dumps({'error': str(e)})}\n\n")
+    finally:
+        bot_semaphore.release()
+        await task_streams[task_id].put("__DONE__")
+
 @app.post("/execute")
 async def execute_workflow(request: Request):
-    async def error_stream(msg: str):
-        yield f"data: {json.dumps({'error': msg})}\n\n"
-
-    if bot_semaphore.locked():
-        # Reject new requests if a workflow is already running to protect the browser instance
-        return StreamingResponse(error_stream("Server is busy. Please try again later."), media_type="text/event-stream")
-
     try:
         data = await request.json()
     except Exception as e:
-        return StreamingResponse(error_stream(f"Invalid JSON payload: {str(e)}"), media_type="text/event-stream")
+        return JSONResponse({"error": f"Invalid JSON payload: {str(e)}"}, status_code=400)
 
     steps = data.get('steps', [])
     workspace_id = data.get('workspace_id')
@@ -1166,33 +1182,34 @@ async def execute_workflow(request: Request):
     global_state = data.get('global_state', {})
 
     if not steps:
-        return StreamingResponse(error_stream("No steps provided in workflow."), media_type="text/event-stream")
+        return JSONResponse({"error": "No steps provided in workflow."}, status_code=400)
 
-    # Acquire the semaphore after payload parsing to prevent deadlocks on invalid requests
-    try:
-        await asyncio.wait_for(bot_semaphore.acquire(), timeout=0.1)
-    except asyncio.TimeoutError:
-        return StreamingResponse(error_stream("Server is busy. Please try again later."), media_type="text/event-stream")
+    task_id = str(uuid.uuid4())
+    task_streams[task_id] = asyncio.Queue()
 
-    if cancel_event:
-        cancel_event.clear()
+    # Spawn background task instantly
+    asyncio.create_task(execution_wrapper(task_id, steps, workspace_id, profile_id, run_variables, global_state))
 
-    # Shared queue to receive pseudo-streaming updates from the bot callback
-    stream_queue = asyncio.Queue()
+    return JSONResponse({"task_id": task_id, "status": "queued"})
 
-    async def sse_wrapper():
+@app.get("/api/logs/{task_id}")
+async def stream_logs(task_id: str):
+    if task_id not in task_streams:
+        return JSONResponse({"error": "Task not found"}, status_code=404)
+
+    async def log_generator():
+        queue = task_streams[task_id]
         try:
-            async for event in run_workflow_engine(steps, workspace_id, stream_queue, profile_id, run_variables, global_state):
+            while True:
+                event = await queue.get()
+                if event == "__DONE__":
+                    break
                 yield event
         finally:
-            bot_semaphore.release()
+            if task_id in task_streams:
+                del task_streams[task_id]
 
-    return StreamingResponse(sse_wrapper(), media_type="text/event-stream")
-
-    # We use StreamingResponse to send Server-Sent Events (SSE) back to the client
-    # This prevents the long-running process from timing out the HTTP connection
-    # and provides real-time feedback to the UI.
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
+    return StreamingResponse(log_generator(), media_type="text/event-stream")
 
 if __name__ == '__main__':
     import uvicorn
