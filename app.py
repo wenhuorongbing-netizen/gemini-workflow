@@ -386,19 +386,21 @@ async def run_workflow_engine(steps, workspace_id, stream_queue=None, profile_id
     run_id = str(uuid.uuid4())
     page = None
     try:
-        try:
-            current_bot = await get_bot(profile_id)
-            page = await current_bot.create_new_page()
-        except Exception as e:
-            if stream_queue: yield f"data: {json.dumps({'error': str(e)})}\n\n"
-            return
-
         results = {}
         correction_counts = {}
+        page = None
+        current_bot = None
 
         index = 0
         while index < len(steps):
             step = steps[index]
+            step_profile_id = step.get('profileId', profile_id)
+
+            # Re-initialize bot if profile changes or not yet initialized
+            if not current_bot or getattr(current_bot, 'profile_path', None) != (f"chrome_profile_{step_profile_id}" if step_profile_id != "1" else "chrome_profile"):
+                if page: await page.close()
+                current_bot = await get_bot(step_profile_id)
+                page = await current_bot.create_new_page()
             if cancel_event and cancel_event.is_set():
                 if stream_queue: yield f"data: {json.dumps({'step': index + 1, 'status': 'Canceled', 'message': 'Workflow stopped by user.'})}\n\n"
                 break
@@ -435,7 +437,17 @@ async def run_workflow_engine(steps, workspace_id, stream_queue=None, profile_id
             logging.info(f"Executing Step {step_id} (Type: {step_type})")
             if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Starting', 'message': f'Executing Step {step_id}...'})}\n\n"
 
-            if step_type == 'approval':
+            if step_type == 'file':
+                file_name = step.get('fileName', 'Unknown File')
+                file_content = step.get('fileContent', '')
+                results[str(step_id)] = file_content
+                # Export as a global-like variable for immediate downstream use via {{FILE_CONTENT}}
+                global_state['FILE_CONTENT'] = file_content
+                if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Complete', 'result': f'Loaded file: {file_name}', 'show_result': show_result})}\n\n"
+                index += 1
+                continue
+
+            elif step_type == 'approval':
                 prev_result = results.get(str(step_id - 1), "")
 
                 approval_events[run_id] = {

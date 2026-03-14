@@ -15,7 +15,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       return NextResponse.json([]);
     }
 
-    const runs = await prisma.executionHistory.findMany({
+    const runs = await prisma.runHistory.findMany({
       where: { workflowId: workflow.id },
       orderBy: { createdAt: 'desc' }
     });
@@ -29,7 +29,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
 export async function POST(request: NextRequest, { params }: { params: Promise<{ workflowId: string }> }) {
   try {
     const { workflowId } = await params;
-    const { status, logs, results } = await request.json();
+    const { status, logs, results, nodes, edges } = await request.json();
 
     const workflow = await prisma.workflowBlueprint.findUnique({
       where: { workspaceId: workflowId }
@@ -39,12 +39,14 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
        return NextResponse.json({ error: 'Workflow blueprint not found. Save it first.' }, { status: 404 });
     }
 
-    const run = await prisma.executionHistory.create({
+    const run = await prisma.runHistory.create({
       data: {
         workflowId: workflow.id,
         status,
         logs: JSON.stringify(logs),
-        results: JSON.stringify(results)
+        results: JSON.stringify(results),
+        nodes: nodes ? JSON.stringify(nodes) : null,
+        edges: edges ? JSON.stringify(edges) : null
       }
     });
 

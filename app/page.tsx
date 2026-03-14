@@ -55,8 +55,11 @@ const BaseNode = ({ icon: Icon, title, content, bgColor, borderColor, data }: an
         </div>
         {StatusIcon && <StatusIcon size={16} className={status === 'running' ? 'animate-spin text-blue-400' : status === 'success' ? 'text-emerald-400' : 'text-rose-400'} />}
       </div>
-      <div className="p-4 flex-1 text-sm bg-slate-900/50">
+      <div className="p-4 flex-1 text-sm bg-slate-900/50 relative">
         <div className="text-slate-300 truncate">{content}</div>
+        {((data?.prompt && data.prompt.includes("{{")) || (data?.systemPrompt && data.systemPrompt.includes("{{"))) && (
+            <span className="absolute bottom-2 right-2 bg-blue-500 text-white text-[10px] px-1.5 py-0.5 rounded shadow-sm">Var</span>
+        )}
       </div>
       <Handle type="source" position={Position.Bottom} className="w-3 h-3 !bg-slate-300" />
     </div>
@@ -73,6 +76,10 @@ const GeminiNode = ({ data }: any) => (
 
 const ScraperNode = ({ data }: any) => (
   <BaseNode data={data} icon={Globe} title="Web Scraper" content={data.url || "https://..."} bgColor="bg-amber-900" borderColor="border-amber-700" />
+);
+
+const FileNode = ({ data }: any) => (
+  <BaseNode data={data} icon={Database} title="Local File" content={data.fileName || "Upload a file..."} bgColor="bg-emerald-900" borderColor="border-emerald-700" />
 );
 
 const StateNode = ({ data }: any) => {
@@ -104,6 +111,7 @@ const nodeTypes = {
   scraper: ScraperNode,
   agentic_loop: AgentLoopNode,
   state: StateNode,
+  file: FileNode,
 };
 
 const initialNodes: Node[] = [
@@ -160,6 +168,9 @@ function compileNodesToSteps(nodes: Node[], edges: Edge[]) {
             system_prompt: n.data.systemPrompt || '',
             new_chat: n.data.new_chat || false,
             show_result: true,
+            profileId: n.data.profileId || '1',
+            fileName: n.data.fileName || '',
+            fileContent: n.data.fileContent || '',
         };
 
         if (n.type === 'agentic_loop') {
@@ -198,6 +209,19 @@ const PropertiesPanel = ({ selectedNodeId, nodes, updateNodeData, isPlaybackMode
 
             {node.type === 'gemini' && (
               <div className="space-y-4">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Account Profile</label>
+                  <select
+                    className="w-full px-3 py-2 border border-slate-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 bg-white"
+                    value={node.data.profileId as string || '1'}
+                    onChange={(e) => updateNodeData(node.id, { profileId: e.target.value })}
+                    disabled={isPlaybackMode}
+                  >
+                    <option value="1">Main Account (Profile 1)</option>
+                    <option value="2">Secondary Bot (Profile 2)</option>
+                    <option value="3">Tertiary Bot (Profile 3)</option>
+                  </select>
+                </div>
                 <div>
                   <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">System Role (System Prompt)</label>
                   <textarea
@@ -241,6 +265,37 @@ const PropertiesPanel = ({ selectedNodeId, nodes, updateNodeData, isPlaybackMode
                     disabled={isPlaybackMode}
                     placeholder="Enter AI prompt... Use {{NODE_ID}} to inject previous outputs."
                   />
+                </div>
+              </div>
+            )}
+
+            {node.type === 'file' && (
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Upload Local File</label>
+                  <input
+                    type="file"
+                    className="w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:text-sm file:font-semibold file:bg-emerald-50 file:text-emerald-700 hover:file:bg-emerald-100"
+                    onChange={(e) => {
+                        const file = e.target.files?.[0];
+                        if (!file) return;
+                        const reader = new FileReader();
+                        reader.onload = (event) => {
+                            const result = event.target?.result as string;
+                            updateNodeData(node.id, { fileName: file.name, fileContent: result });
+                        };
+                        reader.readAsText(file);
+                    }}
+                    disabled={isPlaybackMode}
+                  />
+                </div>
+                {node.data.fileName && (
+                    <div className="text-xs text-emerald-600 bg-emerald-50 p-2 rounded">
+                        <strong>Loaded:</strong> {node.data.fileName as string}
+                    </div>
+                )}
+                <div className="text-[10px] text-slate-500">
+                    Extracts text to be referenced downstream using {'{{'}NODE_ID{'}}'} or {'{{'}FILE_CONTENT{'}}'}.
                 </div>
               </div>
             )}
@@ -374,6 +429,7 @@ export default function AppShell() {
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [isExecuting, setIsExecuting] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [isSyncing, setIsSyncing] = useState(false);
   const [logs, setLogs] = useState<{status: string, message: string}[]>([]);
   const logsEndRef = useRef<HTMLDivElement>(null);
 
@@ -395,13 +451,16 @@ export default function AppShell() {
 
   // Auto-Save Debounce
   useEffect(() => {
-    if (!selectedWorkspace || isLoading) return;
+    if (!selectedWorkspace || isLoading || isPlaybackMode) return;
 
     const timeoutId = setTimeout(() => {
         fetch(`/api/workflows/save`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ workspaceId: selectedWorkspace.id, nodes, edges })
+        }).then(() => {
+            setIsSyncing(true);
+            setTimeout(() => setIsSyncing(false), 2000);
         }).catch(e => console.error("Silent auto-save failed", e));
     }, 1000);
 
@@ -658,8 +717,10 @@ export default function AppShell() {
                                     headers: { 'Content-Type': 'application/json' },
                                     body: JSON.stringify({
                                         status: data.status,
-                                        logs: [], // We can pass accumulated logs here if desired
-                                        results: data.results || {}
+                                        logs: logs,
+                                        results: data.results || {},
+                                        nodes: nodes,
+                                        edges: edges
                                     })
                                 });
                                 // Refresh history
@@ -716,6 +777,59 @@ export default function AppShell() {
             ))
           )}
         </div>
+
+        {selectedWorkspace && runHistory.length > 0 && (
+          <div className="flex-1 overflow-y-auto p-3 space-y-1 border-t border-slate-800 bg-slate-900/50">
+            <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-3 px-2 mt-2">
+              🕰️ History
+            </div>
+            {runHistory.map(run => (
+              <button
+                key={run.id}
+                onClick={() => {
+                    try {
+                        const parsedResults = JSON.parse(run.results || "{}");
+                        setPlaybackRun({ ...run, parsedResults });
+
+                        let historicalNodes = nodes;
+                        let historicalEdges = [];
+                        try {
+                            if (run.nodes) historicalNodes = JSON.parse(run.nodes);
+                            if (run.edges) historicalEdges = JSON.parse(run.edges);
+                            setEdges(historicalEdges);
+                            if (run.logs) {
+                                try { setLogs(JSON.parse(run.logs)); } catch(e){}
+                            }
+                        } catch(e) {}
+
+                        setNodes(historicalNodes.map((n: any) => {
+                            if (parsedResults[n.id]) {
+                                return { ...n, data: { ...n.data, executionStatus: 'success' } };
+                            }
+                            return n;
+                        }));
+                    } catch(e) {
+                        alert("Failed to parse run results snapshot.");
+                    }
+                }}
+                className={`w-full text-left px-3 py-2 rounded-md transition-all text-xs flex flex-col gap-1 border ${
+                  playbackRun?.id === run.id
+                    ? "bg-slate-800 border-slate-700 shadow-inner"
+                    : "hover:bg-slate-800/80 border-transparent hover:border-slate-700"
+                }`}
+              >
+                <div className="flex items-center justify-between">
+                    <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${run.status === 'Workflow Finished' || run.status === 'Complete' ? 'bg-emerald-900/50 text-emerald-400' : 'bg-rose-900/50 text-rose-400'}`}>
+                        {run.status === 'Workflow Finished' ? 'SUCCESS' : 'FAILED'}
+                    </span>
+                    <span className="text-slate-500 font-mono text-[10px]">{new Date(run.createdAt).toLocaleTimeString()}</span>
+                </div>
+                <div className="text-slate-400 font-mono truncate">{new Date(run.createdAt).toLocaleDateString()}</div>
+              </button>
+            ))}
+          </div>
+        )}
+
         <div className="p-4 border-t border-slate-800">
           <button
             onClick={handleNewWorkspace}
@@ -734,37 +848,23 @@ export default function AppShell() {
             <h2 className="text-xl font-bold text-slate-800 truncate">
               {selectedWorkspace ? selectedWorkspace.name : "Select a Workspace"}
             </h2>
-            <div className="flex bg-slate-100 p-1 rounded-lg border border-slate-200 ml-4">
-              <button
-                onClick={() => setActiveTab("editor")}
-                className={`px-4 py-1.5 text-sm font-semibold rounded-md transition-all ${
-                  activeTab === "editor"
-                    ? "bg-white text-blue-600 shadow-sm border border-slate-200"
-                    : "text-slate-500 hover:text-slate-700"
-                }`}
-              >
-                Canvas Editor
-              </button>
-              <button
-                onClick={() => setActiveTab("runs")}
-                className={`px-4 py-1.5 text-sm font-semibold rounded-md transition-all ${
-                  activeTab === "runs"
-                    ? "bg-white text-blue-600 shadow-sm border border-slate-200"
-                    : "text-slate-500 hover:text-slate-700"
-                }`}
-              >
-                Run History
-              </button>
-            </div>
+
           </div>
 
           <div className="flex items-center space-x-3">
+            <div className="flex items-center gap-2 mr-2">
+                {isSyncing ? (
+                    <div className="flex items-center gap-1 text-emerald-600 text-xs font-bold animate-pulse">
+                        <CheckCircle2 size={14} /> Cloud Sync
+                    </div>
+                ) : null}
+            </div>
             <button
               onClick={handleSave}
               disabled={!selectedWorkspace || isSaving}
               className="bg-slate-800 hover:bg-slate-900 text-white px-4 py-2 rounded-md font-medium text-sm transition-colors shadow-sm flex items-center gap-2 disabled:opacity-50"
             >
-              <FileJson size={16} /> {isSaving ? "Saving..." : "💾 Save Workflow"}
+              <FileJson size={16} /> Save
             </button>
             <button
               onClick={handleRun}
@@ -779,11 +879,12 @@ export default function AppShell() {
         </header>
 
         {/* Toolbar */}
-        {activeTab === "editor" && (
+        {true && (
             <div className="bg-slate-100 border-b border-slate-200 px-6 py-2 flex items-center gap-2 z-10 shadow-sm">
                 <span className="text-sm font-bold text-slate-500 mr-2 uppercase tracking-wide">Nodes:</span>
                 <button onClick={() => addNode('gemini')} className="px-3 py-1.5 bg-white border border-slate-300 rounded text-sm font-medium hover:bg-blue-50 text-blue-700 transition flex items-center gap-1"><Bot size={14}/> Gemini AI</button>
                 <button onClick={() => addNode('scraper')} className="px-3 py-1.5 bg-white border border-slate-300 rounded text-sm font-medium hover:bg-amber-50 text-amber-700 transition flex items-center gap-1"><Globe size={14}/> Web Scraper</button>
+                <button onClick={() => addNode('file')} className="px-3 py-1.5 bg-white border border-slate-300 rounded text-sm font-medium hover:bg-emerald-50 text-emerald-700 transition flex items-center gap-1"><Database size={14}/> Upload File</button>
                 <button onClick={() => addNode('agentic_loop')} className="px-3 py-1.5 bg-white border border-slate-300 rounded text-sm font-medium hover:bg-purple-50 text-purple-700 transition flex items-center gap-1"><Repeat size={14}/> Agent Loop</button>
                 <button onClick={() => addNode('state')} className="px-3 py-1.5 bg-white border border-slate-300 rounded text-sm font-medium hover:bg-slate-200 text-slate-700 transition flex items-center gap-1"><Database size={14}/> Global State</button>
             </div>
@@ -791,8 +892,7 @@ export default function AppShell() {
 
         {/* Workspace Content Area */}
         <div className="flex-1 relative w-full h-full">
-          {activeTab === "editor" ? (
-            <>
+          <>
              <ReactFlow
                 nodes={nodes}
                 edges={edges}
@@ -814,7 +914,10 @@ export default function AppShell() {
                     <CheckCircle2 size={18} /> PLAYBACK MODE ACTIVE (Read-Only)
                     <button onClick={() => {
                         setPlaybackRun(null);
-                        setNodes(nds => nds.map(n => ({...n, data: {...n.data, executionStatus: 'idle'}})));
+                        setLogs([]);
+                        if (selectedWorkspace) {
+                            fetchWorkflowData(selectedWorkspace.id);
+                        }
                     }} className="ml-4 bg-white text-rose-600 px-3 py-1 rounded text-xs hover:bg-rose-50">Exit Playback</button>
                  </div>
              )}
@@ -870,55 +973,6 @@ export default function AppShell() {
                 />
              )}
             </>
-          ) : activeTab === "runs" ? (
-            <div className="w-full max-w-5xl mx-auto p-8">
-              <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
-                <div className="px-6 py-4 border-b border-slate-200 bg-slate-50 flex justify-between items-center">
-                    <h3 className="font-bold text-slate-800 text-lg flex items-center gap-2"><Bot className="text-blue-500"/> Execution History</h3>
-                </div>
-                <div className="divide-y divide-slate-100">
-                    {runHistory.length === 0 ? (
-                        <div className="p-8 text-center text-slate-500">No runs recorded for this workspace yet. Execute the canvas to create a snapshot.</div>
-                    ) : runHistory.map(run => (
-                        <div key={run.id} className="p-6 flex items-center justify-between hover:bg-slate-50 transition">
-                            <div>
-                                <div className="flex items-center gap-3 mb-1">
-                                    <span className={`px-2.5 py-0.5 rounded text-xs font-bold ${run.status === 'Workflow Finished' || run.status === 'Complete' ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>
-                                        {run.status === 'Workflow Finished' ? 'SUCCESS' : run.status.toUpperCase()}
-                                    </span>
-                                    <span className="text-sm font-medium text-slate-700">{new Date(run.createdAt).toLocaleString()}</span>
-                                </div>
-                                <div className="text-xs text-slate-500 font-mono">Run ID: {run.id}</div>
-                            </div>
-                            <button
-                                onClick={() => {
-                                    try {
-                                        const parsedResults = JSON.parse(run.results || "{}");
-                                        setPlaybackRun({ ...run, parsedResults });
-                                        // Update nodes to show success state for all nodes that have a result
-                                        setNodes(nds => nds.map(n => {
-                                            if (parsedResults[n.id]) {
-                                                return { ...n, data: { ...n.data, executionStatus: 'success' } };
-                                            }
-                                            return n;
-                                        }));
-                                        setActiveTab('editor');
-                                    } catch(e) {
-                                        alert("Failed to parse run results snapshot.");
-                                    }
-                                }}
-                                className="px-4 py-2 bg-slate-900 text-white rounded text-sm font-medium hover:bg-slate-800 shadow-sm transition flex items-center gap-2"
-                            >
-                                <Play size={14} /> View Snapshot
-                            </button>
-                        </div>
-                    ))}
-                </div>
-              </div>
-            </div>
-          ) : (
-            <div className="hidden"></div>
-          )}
         </div>
       </main>
     </div>

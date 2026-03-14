@@ -24,15 +24,17 @@ model WorkflowBlueprint {
   edges       String   // JSON string of React Flow edges
   updatedAt   DateTime @updatedAt
 
-  history     ExecutionHistory[]
+  history     RunHistory[]
 }
 
-model ExecutionHistory {
+model RunHistory {
   id           String   @id @default(cuid())
   workflowId   String
   workflow     WorkflowBlueprint @relation(fields: [workflowId], references: [id], onDelete: Cascade)
   status       String
   logs         String   // JSON string of execution SSE logs
   results      String   // JSON string of explicit Node ID results map
+  nodes        String?
+  edges        String?
   createdAt    DateTime @default(now())
 }
