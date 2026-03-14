@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef, useTransition } from "react";
 import {
   ReactFlow,
   Controls,
@@ -144,11 +144,13 @@ function compileNodesToSteps(nodes: Node[], edges: Edge[]) {
         if (n.type === 'agentic_loop') {
             return {
                 ...base,
+                id: n.id,
                 chat_url: n.data.url || '',
-                max_iterations: n.data.max_iterations || 3
+                max_iterations: n.data.max_iterations || 3,
+                reset_threshold: n.data.reset_threshold || 3
             };
         }
-        return base;
+        return { ...base, id: n.id };
     });
 
     return { steps, nodeOrder: actionNodes.map(n => n.id) };
@@ -159,7 +161,7 @@ function compileNodesToSteps(nodes: Node[], edges: Edge[]) {
 export default function AppShell() {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [selectedWorkspace, setSelectedWorkspace] = useState<Workspace | null>(null);
-  const [activeTab, setActiveTab] = useState<"editor" | "dashboard">("editor");
+  const [activeTab, setActiveTab] = useState<"editor" | "dashboard" | "runs">("editor");
   const [isLoading, setIsLoading] = useState(true);
 
   // React Flow State
@@ -171,6 +173,11 @@ export default function AppShell() {
   const [logs, setLogs] = useState<{status: string, message: string}[]>([]);
   const logsEndRef = useRef<HTMLDivElement>(null);
 
+  // Snapshot / Run History State
+  const [runHistory, setRunHistory] = useState<any[]>([]);
+  const [playbackRun, setPlaybackRun] = useState<any | null>(null);
+  const isPlaybackMode = !!playbackRun;
+
   useEffect(() => {
     logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [logs]);
@@ -180,6 +187,31 @@ export default function AppShell() {
       fetchWorkflowData(selectedWorkspace.id);
     }
   }, [selectedWorkspace]);
+
+
+  // Auto-Save Debounce
+  useEffect(() => {
+    if (!selectedWorkspace || isLoading) return;
+
+    const timeoutId = setTimeout(() => {
+      saveWorkflowSilent();
+    }, 2000);
+
+    return () => clearTimeout(timeoutId);
+  }, [nodes, edges, selectedWorkspace]);
+
+  const saveWorkflowSilent = async () => {
+    if (!selectedWorkspace) return;
+    try {
+        await fetch(`/api/workflows/${selectedWorkspace.id}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ nodes, edges })
+        });
+    } catch (e) {
+        console.error("Silent auto-save failed", e);
+    }
+  };
 
   const fetchWorkflowData = async (workspaceId: string) => {
     try {
@@ -193,6 +225,11 @@ export default function AppShell() {
             setNodes(initialNodes);
             setEdges(initialEdges);
         }
+      }
+
+      const runRes = await fetch(`/api/runs/${workspaceId}`);
+      if (runRes.ok) {
+          setRunHistory(await runRes.json());
       }
     } catch (e) {
       console.error("Failed to load workflow data", e);
@@ -379,6 +416,25 @@ export default function AppShell() {
 
                         if (data.status === 'Workflow Finished' || data.status === 'Error' || data.status === 'Canceled') {
                             setIsExecuting(false);
+
+                            // Save to Execution History
+                            if (selectedWorkspace) {
+                                // Re-map results to node IDs based on step numbers if they aren't already
+                                // app.py returns strings matching past_id. Our past_id logic uses `step.id`, which we set to `nodeOrder[index]`.
+                                // Wait, `app.py` `step_id` is now literally `step.get('id')` which IS the React Flow Node ID.
+                                // So `data.results` dictionary has keys that are exactly `node.id`.
+                                await fetch(`/api/runs/${selectedWorkspace.id}`, {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({
+                                        status: data.status,
+                                        logs: [], // We can pass accumulated logs here if desired
+                                        results: data.results || {}
+                                    })
+                                });
+                                // Refresh history
+                                fetchWorkflowData(selectedWorkspace.id);
+                            }
                         }
                     } catch (e) {
                         console.error("Error parsing chunk:", e);
@@ -460,14 +516,14 @@ export default function AppShell() {
                 Canvas Editor
               </button>
               <button
-                onClick={() => setActiveTab("dashboard")}
+                onClick={() => setActiveTab("runs")}
                 className={`px-4 py-1.5 text-sm font-semibold rounded-md transition-all ${
-                  activeTab === "dashboard"
+                  activeTab === "runs"
                     ? "bg-white text-blue-600 shadow-sm border border-slate-200"
                     : "text-slate-500 hover:text-slate-700"
                 }`}
               >
-                Dashboard
+                Run History
               </button>
             </div>
           </div>
@@ -522,6 +578,16 @@ export default function AppShell() {
                 <Controls className="bg-slate-800 border-slate-700 !fill-slate-800" />
              </ReactFlow>
 
+             {isPlaybackMode && (
+                 <div className="absolute top-4 left-1/2 transform -translate-x-1/2 bg-rose-500 text-white px-6 py-2 rounded-full font-bold shadow-lg shadow-rose-500/30 z-40 flex items-center gap-2 border-2 border-rose-400">
+                    <CheckCircle2 size={18} /> PLAYBACK MODE ACTIVE (Read-Only)
+                    <button onClick={() => {
+                        setPlaybackRun(null);
+                        setNodes(nds => nds.map(n => ({...n, data: {...n.data, executionStatus: 'idle'}})));
+                    }} className="ml-4 bg-white text-rose-600 px-3 py-1 rounded text-xs hover:bg-rose-50">Exit Playback</button>
+                 </div>
+             )}
+
              {/* Floating Execution Log Panel */}
              {logs.length > 0 && (
                  <div className="absolute bottom-6 left-6 w-[400px] h-[300px] bg-slate-900 border border-slate-700 rounded-xl shadow-[0_10px_40px_-10px_rgba(0,0,0,0.8)] z-30 flex flex-col overflow-hidden text-slate-300 transition-all">
@@ -564,12 +630,36 @@ export default function AppShell() {
 
                        {node.type === 'gemini' && (
                          <div>
-                           <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Prompt</label>
+                           <div className="flex justify-between items-center mb-1">
+                             <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider">Prompt</label>
+
+                             <div className="relative group">
+                               <button className="text-xs bg-slate-200 hover:bg-blue-100 text-blue-700 px-2 py-0.5 rounded transition">
+                                 + Insert Variable
+                               </button>
+                               <div className="absolute right-0 top-full mt-1 w-48 bg-white border border-slate-200 rounded-md shadow-xl opacity-0 group-hover:opacity-100 pointer-events-none group-hover:pointer-events-auto transition-opacity z-50 p-1 flex flex-col gap-1 max-h-48 overflow-y-auto">
+                                 {nodes.filter(n => n.id !== node.id).map(n => (
+                                   <button
+                                     key={n.id}
+                                     onClick={() => {
+                                       const newVal = (node.data.prompt || '') + ` {{${n.id}}}`;
+                                       updateNodeData(node.id, { prompt: newVal });
+                                     }}
+                                     className="text-left text-xs px-2 py-1.5 hover:bg-slate-100 rounded text-slate-700 truncate"
+                                   >
+                                     <span className="font-semibold">{n.type}</span>: {String(n.data.prompt || n.data.url || 'Node')}
+                                   </button>
+                                 ))}
+                                 {nodes.length <= 1 && <div className="text-xs text-slate-400 p-2 text-center">No other nodes</div>}
+                               </div>
+                             </div>
+                           </div>
                            <textarea
                              className="w-full h-48 px-3 py-2 border border-slate-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                              value={node.data.prompt as string || ''}
                              onChange={(e) => updateNodeData(node.id, { prompt: e.target.value })}
-                             placeholder="Enter AI prompt..."
+                             disabled={isPlaybackMode}
+                             placeholder="Enter AI prompt... Use {{NODE_ID}} to inject previous outputs."
                            />
                          </div>
                        )}
@@ -582,6 +672,7 @@ export default function AppShell() {
                              className="w-full px-3 py-2 border border-slate-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-amber-500 focus:border-amber-500"
                              value={node.data.url as string || ''}
                              onChange={(e) => updateNodeData(node.id, { url: e.target.value })}
+                               disabled={isPlaybackMode}
                              placeholder="https://..."
                            />
                          </div>
@@ -596,6 +687,7 @@ export default function AppShell() {
                                className="w-full px-3 py-2 border border-slate-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-purple-500"
                                value={node.data.url as string || ''}
                                onChange={(e) => updateNodeData(node.id, { url: e.target.value })}
+                               disabled={isPlaybackMode}
                                placeholder="https://github.com/..."
                              />
                            </div>
@@ -608,7 +700,21 @@ export default function AppShell() {
                                className="w-full px-3 py-2 border border-slate-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-purple-500"
                                value={node.data.max_iterations as number || 3}
                                onChange={(e) => updateNodeData(node.id, { max_iterations: parseInt(e.target.value, 10) || 3 })}
+                               disabled={isPlaybackMode}
                              />
+                           </div>
+                           <div>
+                             <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Context Reset Frequency</label>
+                             <input
+                               type="number"
+                               min="1"
+                               max="10"
+                               className="w-full px-3 py-2 border border-slate-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-purple-500"
+                               value={node.data.reset_threshold as number || 3}
+                               onChange={(e) => updateNodeData(node.id, { reset_threshold: parseInt(e.target.value, 10) || 3 })}
+                               disabled={isPlaybackMode}
+                             />
+                             <p className="text-[10px] text-slate-500 mt-1">Clears DOM every N steps to prevent crashing.</p>
                            </div>
                          </>
                        )}
@@ -618,19 +724,69 @@ export default function AppShell() {
                            Trigger nodes are the starting point of the execution graph. No configuration needed.
                          </div>
                        )}
+
+                       {isPlaybackMode && playbackRun && playbackRun.parsedResults && playbackRun.parsedResults[node.id] && (
+                           <div className="mt-6 border-t border-slate-200 pt-4">
+                               <label className="block text-xs font-semibold text-emerald-600 uppercase tracking-wider mb-2">Snapshot Output Result</label>
+                               <div className="p-3 bg-slate-900 text-slate-300 text-xs rounded-md overflow-x-auto whitespace-pre-wrap font-mono max-h-96 overflow-y-auto">
+                                   {playbackRun.parsedResults[node.id]}
+                               </div>
+                           </div>
+                       )}
                      </div>
                    ))}
                  </div>
                </div>
              )}
             </>
-          ) : (
-            <div className="h-full flex flex-col items-center justify-center p-8">
-              <div className="w-full max-w-4xl bg-white rounded-xl shadow-sm border border-slate-200 p-8 text-center h-[500px] flex flex-col items-center justify-center">
-                 <h3 className="text-2xl font-bold text-slate-700 mb-2">Dashboard Analytics</h3>
-                 <p className="text-slate-500">Execution results will appear here after running the canvas.</p>
+          ) : activeTab === "runs" ? (
+            <div className="w-full max-w-5xl mx-auto p-8">
+              <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+                <div className="px-6 py-4 border-b border-slate-200 bg-slate-50 flex justify-between items-center">
+                    <h3 className="font-bold text-slate-800 text-lg flex items-center gap-2"><Bot className="text-blue-500"/> Execution History</h3>
+                </div>
+                <div className="divide-y divide-slate-100">
+                    {runHistory.length === 0 ? (
+                        <div className="p-8 text-center text-slate-500">No runs recorded for this workspace yet. Execute the canvas to create a snapshot.</div>
+                    ) : runHistory.map(run => (
+                        <div key={run.id} className="p-6 flex items-center justify-between hover:bg-slate-50 transition">
+                            <div>
+                                <div className="flex items-center gap-3 mb-1">
+                                    <span className={`px-2.5 py-0.5 rounded text-xs font-bold ${run.status === 'Workflow Finished' || run.status === 'Complete' ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>
+                                        {run.status === 'Workflow Finished' ? 'SUCCESS' : run.status.toUpperCase()}
+                                    </span>
+                                    <span className="text-sm font-medium text-slate-700">{new Date(run.createdAt).toLocaleString()}</span>
+                                </div>
+                                <div className="text-xs text-slate-500 font-mono">Run ID: {run.id}</div>
+                            </div>
+                            <button
+                                onClick={() => {
+                                    try {
+                                        const parsedResults = JSON.parse(run.results || "{}");
+                                        setPlaybackRun({ ...run, parsedResults });
+                                        // Update nodes to show success state for all nodes that have a result
+                                        setNodes(nds => nds.map(n => {
+                                            if (parsedResults[n.id]) {
+                                                return { ...n, data: { ...n.data, executionStatus: 'success' } };
+                                            }
+                                            return n;
+                                        }));
+                                        setActiveTab('editor');
+                                    } catch(e) {
+                                        alert("Failed to parse run results snapshot.");
+                                    }
+                                }}
+                                className="px-4 py-2 bg-slate-900 text-white rounded text-sm font-medium hover:bg-slate-800 shadow-sm transition flex items-center gap-2"
+                            >
+                                <Play size={14} /> View Snapshot
+                            </button>
+                        </div>
+                    ))}
+                </div>
               </div>
             </div>
+          ) : (
+            <div className="hidden"></div>
           )}
         </div>
       </main>

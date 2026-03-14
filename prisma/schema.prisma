@@ -32,6 +32,7 @@ model ExecutionHistory {
   workflowId   String
   workflow     WorkflowBlueprint @relation(fields: [workflowId], references: [id], onDelete: Cascade)
   status       String
-  logs         String   // JSON string
+  logs         String   // JSON string of execution SSE logs
+  results      String   // JSON string of explicit Node ID results map
   createdAt    DateTime @default(now())
 }

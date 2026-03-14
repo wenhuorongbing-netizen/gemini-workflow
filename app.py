@@ -401,7 +401,7 @@ async def run_workflow_engine(steps, workspace_id, stream_queue=None, profile_id
                 if stream_queue: yield f"data: {json.dumps({'step': index + 1, 'status': 'Canceled', 'message': 'Workflow stopped by user.'})}\n\n"
                 break
 
-            step_id = index + 1
+            step_id = step.get('id', str(index + 1))
             prompt_template = step.get('prompt', '')
             new_chat = step.get('new_chat', False)
             step_type = step.get('type', 'standard')
@@ -498,12 +498,17 @@ async def run_workflow_engine(steps, workspace_id, stream_queue=None, profile_id
                 # We need accumulated context to pass across reset boundaries
                 accumulated_context = "Task: " + current_gemini_prompt
 
+                try:
+                    reset_threshold = int(step.get('reset_threshold', 3))
+                except ValueError:
+                    reset_threshold = 3
+
                 for i in range(max_iterations):
                     if cancel_event and cancel_event.is_set():
                         break
 
                     # --- Context Reset (Prevent DOM Bloat) ---
-                    if i > 0 and i % 3 == 0:
+                    if i > 0 and i % reset_threshold == 0:
                         if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Agent Loop Checkpoint', 'message': '[TELEMETRY] Routine context reset to prevent DOM bloat. Initializing new chat context...', 'screen': 'left'})}\n\n"
                         # We don't just reload the current page, we explicitly start a new chat
                         # and pass the summarized context to re-ground Gemini without the 3-turn heavy DOM
@@ -886,12 +891,16 @@ async def run_workflow_engine(steps, workspace_id, stream_queue=None, profile_id
                                 if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'New Chat', 'message': 'Starting new chat...'})}\n\n"
                                 await current_bot.start_new_chat(page)
 
-                            # Smart Context Injection: Replace {{OUTPUT_X}} with actual results
+                            # Smart Context Injection: Replace {{OUTPUT_X}} and {{NODE_ID}} with actual results
                             final_prompt = prompt_template
                             for past_id, past_output in results.items():
                                 tag = f"{{{{OUTPUT_{past_id}}}}}"
                                 if tag in final_prompt:
                                     final_prompt = final_prompt.replace(tag, past_output)
+
+                                node_tag = f"{{{{{past_id}}}}}"
+                                if node_tag in final_prompt:
+                                    final_prompt = final_prompt.replace(node_tag, str(past_output))
 
                             if len(final_prompt) > CHUNK_LIMIT:
                                 is_chunked = True
