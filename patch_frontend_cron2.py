@@ -1,8 +1,22 @@
-with open("app/page.tsx", "r") as f:
+import re
+
+with open('app/page.tsx', 'r') as f:
     content = f.read()
 
-# I see what's wrong. I replaced value={node.data.triggerType} but it should be node.data.triggerType in the state correctly or default to 'manual'.
-# The UI in the screenshot shows 'Trigger Type: Manual Execution'. When I select 'cron', I need to select the right value.
-# Wait, let's just create a test that directly fills the node.data through the API or mock?
-# Actually, the drop down value is "cron". Is it not selecting it?
-print(content.find('<option value="cron">Scheduled (Cron)</option>'))
+# Add logic to auto-resume on mount
+auto_resume = """
+  useEffect(() => {
+    const savedTaskId = localStorage.getItem('current_task_id');
+    if (savedTaskId) {
+      console.log("Resuming task:", savedTaskId);
+      setIsExecuting(true);
+      connectSSE(savedTaskId);
+    }
+  }, []);
+"""
+
+if "Resuming task" not in content:
+    content = content.replace("export default function Page() {", "export default function Page() {" + auto_resume)
+
+with open('app/page.tsx', 'w') as f:
+    f.write(content)

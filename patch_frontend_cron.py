@@ -1,46 +1,59 @@
-with open("app/page.tsx", "r") as f:
+import re
+
+with open('app/page.tsx', 'r') as f:
     content = f.read()
 
-props_old = """            {node.type === 'trigger' && (
-              <div className="text-sm text-slate-500 italic">
-                Trigger nodes are the starting point of the execution graph. No configuration needed.
-              </div>
-            )}"""
+# Make sure AlertCircle is imported properly
+if "import { AlertCircle" not in content:
+    content = content.replace("import { Home, FileText", "import { Home, FileText, AlertCircle")
 
-props_new = """            {node.type === 'trigger' && (
-              <div className="space-y-4">
-                <div>
-                  <label className="block text-xs font-semibold text-slate-400 mb-1">Trigger Type</label>
-                  <select
-                    className="w-full bg-slate-900 border border-slate-700 rounded-md p-2 text-sm text-slate-300"
-                    value={node.data.triggerType || 'manual'}
-                    onChange={(e) => updateNodeData(node.id, 'triggerType', e.target.value)}
-                  >
-                    <option value="manual">Manual Execution</option>
-                    <option value="cron">Scheduled (Cron)</option>
-                  </select>
-                </div>
-                {node.data.triggerType === 'cron' && (
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-400 mb-1">Cron Expression</label>
-                    <input
-                      type="text"
-                      className="w-full bg-slate-900 border border-slate-700 rounded-md p-2 text-sm text-slate-300 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none"
-                      value={(node.data.cron as string) || ""}
-                      onChange={(e) => updateNodeData(node.id, 'cron', e.target.value)}
-                      placeholder="e.g., */5 * * * *"
-                    />
-                    <div className="text-xs text-slate-500 mt-1 mt-2">
-                        Use standard cron format. e.g. "0 0 * * *" for daily at midnight.
-                        Saves to the backend automatically.
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}"""
+# Add auto-scroll effect
+auto_scroll_effect = """  // Auto-scroll logs
+  useEffect(() => {
+    if (logsEndRef.current) {
+      logsEndRef.current.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [logs]);"""
 
-if props_old in content:
-    content = content.replace(props_old, props_new)
+if "// Auto-scroll logs" not in content:
+    content = content.replace("  // Resume SSE stream on load", auto_scroll_effect + "\n\n  // Resume SSE stream on load")
 
-with open("app/page.tsx", "w") as f:
+
+# Update handleRun to save task_id to localStorage
+old_handle_run_success = """      const data = await response.json();
+      if (data.task_id) {
+          connectSSE(data.task_id);
+      }"""
+new_handle_run_success = """      const data = await response.json();
+      if (data.task_id) {
+          localStorage.setItem('current_task_id', data.task_id);
+          connectSSE(data.task_id);
+      }"""
+content = content.replace(old_handle_run_success, new_handle_run_success)
+
+# Update connectSSE to remove task_id on complete
+old_sse_complete = """        if (parsed.status === "Complete" || parsed.status === "Workflow Finished" || parsed.status === "Error" || parsed.status === "Jules Error") {
+            setIsExecuting(false);
+            eventSource.close();
+            setLogs((prev) => [...prev, parsed]);
+
+            // Optionally refetch runs to show the new one
+            if (selectedWorkspace) {
+                fetchRuns(selectedWorkspace.id);
+            }
+        }"""
+new_sse_complete = """        if (parsed.status === "Complete" || parsed.status === "Workflow Finished" || parsed.status === "Error" || parsed.status === "Jules Error") {
+            setIsExecuting(false);
+            eventSource.close();
+            localStorage.removeItem('current_task_id');
+            setLogs((prev) => [...prev, parsed]);
+
+            // Optionally refetch runs to show the new one
+            if (selectedWorkspace) {
+                fetchRuns(selectedWorkspace.id);
+            }
+        }"""
+content = content.replace(old_sse_complete, new_sse_complete)
+
+with open('app/page.tsx', 'w') as f:
     f.write(content)

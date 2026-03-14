@@ -30,7 +30,7 @@ EPICS_FILE = 'epics.json'
 GLOBALS_FILE = 'globals.json'
 TEMPLATES_FILE = 'templates.json'
 HISTORY_FILE = 'history.json'
-HEADLESS_MODE = False
+HEADLESS_MODE = True
 
 def load_history():
     if os.path.exists(HISTORY_FILE):
@@ -1145,6 +1145,21 @@ async def run_workflow_engine(steps, workspace_id, stream_queue=None, profile_id
 
 
 
+
+@app.post("/stop_task/{task_id}")
+async def stop_specific_task(task_id: str):
+    task = active_tasks.get(task_id)
+    if task:
+        task.cancel()
+        del active_tasks[task_id]
+        if task_id in task_streams:
+            await task_streams[task_id].put({"status": "Error", "message": "🚫 Workflow execution manually cancelled by user."})
+            # Give it a moment to send the message before removing the queue
+            await asyncio.sleep(0.5)
+            del task_streams[task_id]
+        return {"status": "cancelled", "task_id": task_id}
+    return {"status": "not_found", "task_id": task_id}
+
 @app.get("/stop")
 async def stop_workflow():
     if cancel_event:
@@ -1174,6 +1189,29 @@ async def execute_workflow(request: Request):
         data = await request.json()
     except Exception as e:
         return JSONResponse({"error": f"Invalid JSON payload: {str(e)}"}, status_code=400)
+    # Cycle detection
+    nodes = data.get('nodes', [])
+    edges = data.get('edges', [])
+    if nodes and edges:
+        in_degree = {node['id']: 0 for node in nodes}
+        for edge in edges:
+            if edge['target'] in in_degree:
+                in_degree[edge['target']] += 1
+        queue = [node_id for node_id, degree in in_degree.items() if degree == 0]
+        visited_count = 0
+        while queue:
+            curr = queue.pop(0)
+            visited_count += 1
+            for edge in edges:
+                if edge['source'] == curr:
+                    target = edge['target']
+                    if target in in_degree:
+                        in_degree[target] -= 1
+                        if in_degree[target] == 0:
+                            queue.append(target)
+        if visited_count != len(nodes) and len(nodes) > 0:
+            return JSONResponse({"error": "Circular dependency detected in workflow diagram."}, status_code=400)
+
 
     steps = data.get('steps', [])
     workspace_id = data.get('workspace_id')

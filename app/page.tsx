@@ -18,7 +18,7 @@ import {
   BackgroundVariant
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { Play, Bot, Globe, Repeat, FileJson, Loader2, CheckCircle2, XCircle, Database } from "lucide-react";
+import { Play, Bot, Globe, Repeat, FileJson, Loader2, CheckCircle2, XCircle, Database, AlertCircle } from "lucide-react";
 
 interface Workspace {
   id: string;
@@ -414,11 +414,20 @@ const PropertiesPanel = ({ selectedNodeId, nodes, updateNodeData, isPlaybackMode
                     <label className="block text-xs font-semibold text-slate-400 mb-1">Cron Expression</label>
                     <input
                       type="text"
-                      className="w-full bg-slate-900 border border-slate-700 rounded-md p-2 text-sm text-slate-300 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none"
+                      className={`w-full bg-slate-900 border rounded-md p-2 text-sm text-slate-300 focus:outline-none ${
+                        (node.data.cron && !/^(\*|([0-9]|1[0-9]|2[0-9]|3[0-9]|4[0-9]|5[0-9])|\*\/([0-9]|1[0-9]|2[0-9]|3[0-9]|4[0-9]|5[0-9])) (\*|([0-9]|1[0-9]|2[0-3])|\*\/([0-9]|1[0-9]|2[0-3])) (\*|([1-9]|1[0-9]|2[0-9]|3[0-1])|\*\/([1-9]|1[0-9]|2[0-9]|3[0-1])) (\*|([1-9]|1[0-2])|\*\/([1-9]|1[0-2])) (\*|([0-6])|\*\/([0-6]))$/.test(node.data.cron as string))
+                        ? 'border-red-500 focus:ring-1 focus:ring-red-500'
+                        : 'border-slate-700 focus:border-blue-500 focus:ring-1 focus:ring-blue-500'
+                      }`}
                       value={(node.data.cron as string) || ""}
                       onChange={(e) => updateNodeData(node.id, { cron: e.target.value })}
                       placeholder="e.g., */5 * * * *"
                     />
+                    {(node.data.cron && !/^(\*|([0-9]|1[0-9]|2[0-9]|3[0-9]|4[0-9]|5[0-9])|\*\/([0-9]|1[0-9]|2[0-9]|3[0-9]|4[0-9]|5[0-9])) (\*|([0-9]|1[0-9]|2[0-3])|\*\/([0-9]|1[0-9]|2[0-3])) (\*|([1-9]|1[0-9]|2[0-9]|3[0-1])|\*\/([1-9]|1[0-9]|2[0-9]|3[0-1])) (\*|([1-9]|1[0-2])|\*\/([1-9]|1[0-2])) (\*|([0-6])|\*\/([0-6]))$/.test(node.data.cron as string)) && (
+                        <div className="text-xs text-red-500 mt-1 flex items-center gap-1">
+                            <AlertCircle size={12}/> ⚠️ Invalid Cron Expression
+                        </div>
+                    )}
                     <div className="text-xs text-slate-500 mt-1 mt-2">
                         Use standard cron format. e.g. "0 0 * * *" for daily at midnight.
                         Saves to the backend automatically.
@@ -649,7 +658,20 @@ export default function AppShell() {
   };
 
   const handleRun = async () => {
-      const { steps: compiledSteps, nodeOrder } = compileNodesToSteps(nodes, edges);
+    if (!selectedWorkspace) return;
+    if (nodes.length === 0) {
+        alert("Please drag at least one node to the canvas before running.");
+        return;
+    }
+
+    let compiledData;
+    try {
+        compiledData = compileNodesToSteps(nodes, edges);
+    } catch (err: any) {
+        alert(err.message || "Failed to compile workflow");
+        return;
+    }
+    const { steps: compiledSteps, nodeOrder } = compiledData;
       console.log("Compiled JSON Payload for app.py:", compiledSteps);
 
       setLogs([]); // Clear previous logs
@@ -898,8 +920,17 @@ export default function AppShell() {
             </div>
             <button
               onClick={handleSave}
-              disabled={!selectedWorkspace || isSaving}
-              className="bg-slate-800 hover:bg-slate-900 text-white px-4 py-2 rounded-md font-medium text-sm transition-colors shadow-sm flex items-center gap-2 disabled:opacity-50"
+              disabled={
+                !selectedWorkspace ||
+                isSaving ||
+                nodes.some(n =>
+                  n.type === 'trigger' &&
+                  n.data?.triggerType === 'cron' &&
+                  n.data?.cron &&
+                  !/^(\*|([0-9]|1[0-9]|2[0-9]|3[0-9]|4[0-9]|5[0-9])|\*\/([0-9]|1[0-9]|2[0-9]|3[0-9]|4[0-9]|5[0-9])) (\*|([0-9]|1[0-9]|2[0-3])|\*\/([0-9]|1[0-9]|2[0-3])) (\*|([1-9]|1[0-9]|2[0-9]|3[0-1])|\*\/([1-9]|1[0-9]|2[0-9]|3[0-1])) (\*|([1-9]|1[0-2])|\*\/([1-9]|1[0-2])) (\*|([0-6])|\*\/([0-6]))$/.test(n.data.cron as string)
+                )
+              }
+              className="bg-slate-800 hover:bg-slate-900 text-white px-4 py-2 rounded-md font-medium text-sm transition-colors shadow-sm flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               <FileJson size={16} /> Save
             </button>
@@ -972,12 +1003,18 @@ export default function AppShell() {
                                 <button
                                     onClick={async () => {
                                         try {
-                                            await fetch("http://127.0.0.1:8000/stop");
+                                            const taskId = localStorage.getItem('current_task_id');
+                                            if (taskId) {
+                                                await fetch(`http://127.0.0.1:8000/stop_task/${taskId}`, { method: 'POST' });
+                                            } else {
+                                                await fetch("http://127.0.0.1:8000/stop");
+                                            }
+                                            setIsExecuting(false);
                                         } catch (e) {}
                                     }}
                                     className="text-xs bg-rose-500/20 hover:bg-rose-500/30 text-rose-400 px-2 py-1 rounded transition flex items-center gap-1 font-bold"
                                 >
-                                    <XCircle size={12}/> Stop Execution
+                                    <XCircle size={12}/> ⏹ Stop Workflow
                                 </button>
                              )}
                              <button onClick={() => setLogs([])} className="text-slate-500 hover:text-slate-300 transition-colors">✕</button>
