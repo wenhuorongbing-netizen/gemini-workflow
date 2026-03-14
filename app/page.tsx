@@ -305,12 +305,21 @@ const PropertiesPanel = ({ selectedNodeId, nodes, updateNodeData, isPlaybackMode
                 <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Target URL</label>
                 <input
                   type="text"
-                  className="w-full px-3 py-2 border border-slate-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-amber-500 focus:border-amber-500"
+                  className={`w-full px-3 py-2 border rounded text-sm focus:outline-none focus:ring-2 ${
+                    (node.data.url && !(node.data.url as string).startsWith('http://') && !(node.data.url as string).startsWith('https://'))
+                      ? 'border-red-500 focus:ring-red-500 bg-red-50 text-red-900'
+                      : 'border-slate-300 focus:ring-amber-500 focus:border-amber-500'
+                  }`}
                   value={node.data.url as string || ''}
                   onChange={(e) => updateNodeData(node.id, { url: e.target.value })}
                     disabled={isPlaybackMode}
                   placeholder="https://..."
                 />
+                {(node.data.url && !(node.data.url as string).startsWith('http://') && !(node.data.url as string).startsWith('https://')) && (
+                    <div className="text-xs text-red-500 mt-1 flex items-center gap-1">
+                        <AlertCircle size={12}/> ⚠️ Must start with http:// or https://
+                    </div>
+                )}
               </div>
             )}
 
@@ -320,12 +329,21 @@ const PropertiesPanel = ({ selectedNodeId, nodes, updateNodeData, isPlaybackMode
                   <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Repository/Target URL</label>
                   <input
                     type="text"
-                    className="w-full px-3 py-2 border border-slate-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-purple-500"
+                    className={`w-full px-3 py-2 border rounded text-sm focus:outline-none focus:ring-2 ${
+                        (node.data.url && !(node.data.url as string).startsWith('http://') && !(node.data.url as string).startsWith('https://'))
+                          ? 'border-red-500 focus:ring-red-500 bg-red-50 text-red-900'
+                          : 'border-slate-300 focus:ring-purple-500 focus:border-purple-500'
+                      }`}
                     value={node.data.url as string || ''}
                     onChange={(e) => updateNodeData(node.id, { url: e.target.value })}
                     disabled={isPlaybackMode}
                     placeholder="https://github.com/..."
                   />
+                  {(node.data.url && !(node.data.url as string).startsWith('http://') && !(node.data.url as string).startsWith('https://')) && (
+                      <div className="text-xs text-red-500 mt-1 flex items-center gap-1">
+                          <AlertCircle size={12}/> ⚠️ Must start with http:// or https://
+                      </div>
+                  )}
                 </div>
                 <div>
                   <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Max Iterations</label>
@@ -474,7 +492,7 @@ export default function AppShell() {
   const isPlaybackMode = !!playbackRun;
 
   useEffect(() => {
-    logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    logsEndRef.current?.scrollIntoView(false);
   }, [logs]);
 
   useEffect(() => {
@@ -609,6 +627,54 @@ export default function AppShell() {
     fetchWorkspaces();
   }, []);
 
+  useEffect(() => {
+    const savedTaskId = localStorage.getItem('current_task_id');
+    if (savedTaskId) {
+      console.log("Resuming task:", savedTaskId);
+      setIsExecuting(true);
+      const eventSource = new EventSource(`http://127.0.0.1:8000/api/logs/${savedTaskId}`);
+
+        eventSource.onmessage = async (event) => {
+            try {
+                if (event.data === "__DONE__") {
+                    eventSource.close();
+                    setIsExecuting(false);
+                    return;
+                }
+                const dataStr = event.data;
+                const data = JSON.parse(dataStr);
+
+                if (data.error) {
+                    console.error("Execution error:", data.error);
+                    setLogs(prev => [...prev, { status: "Error", message: data.error }]);
+                    setIsExecuting(false);
+                    setNodes(nds => nds.map(n => ({ ...n, data: { ...n.data, executionStatus: 'error' } })));
+                    eventSource.close();
+                    return;
+                }
+
+                if (data.status) {
+                    setLogs(prev => [...prev, { status: data.status, message: data.message || data.result || "" }]);
+                }
+
+                if (data.status === 'Workflow Finished' || data.status === 'Error' || data.status === 'Canceled') {
+                    setIsExecuting(false);
+                    localStorage.removeItem('current_task_id');
+                    eventSource.close();
+                }
+            } catch (e) {
+                console.error("Error parsing JSON:", e, event.data);
+            }
+        };
+
+        eventSource.onerror = (err) => {
+            console.error("EventSource failed:", err);
+            setIsExecuting(false);
+            eventSource.close();
+        };
+    }
+  }, []);
+
   const fetchWorkspaces = async () => {
     setIsLoading(true);
     try {
@@ -660,7 +726,7 @@ export default function AppShell() {
   const handleRun = async () => {
     if (!selectedWorkspace) return;
     if (nodes.length === 0) {
-        alert("Please drag at least one node to the canvas before running.");
+        alert("Drag a node to the canvas to begin.");
         return;
     }
 
@@ -709,6 +775,7 @@ export default function AppShell() {
             throw new Error("No task ID returned");
         }
 
+        localStorage.setItem('current_task_id', taskId);
         const eventSource = new EventSource(`http://127.0.0.1:8000/api/logs/${taskId}`);
 
         eventSource.onmessage = async (event) => {
@@ -777,6 +844,7 @@ export default function AppShell() {
                         // Refresh history
                         fetchWorkflowData(selectedWorkspace.id);
                     }
+                    localStorage.removeItem('current_task_id');
                     eventSource.close();
                 }
             } catch (e) {
@@ -936,9 +1004,10 @@ export default function AppShell() {
             </button>
             <button
               onClick={handleRun}
-              disabled={!selectedWorkspace || isExecuting}
+              disabled={!selectedWorkspace || isExecuting || nodes.length === 0}
+              title={nodes.length === 0 ? "Drag a node to the canvas to begin." : ""}
               className={`text-white px-5 py-2 rounded-md font-bold text-sm transition-colors shadow-md flex items-center gap-2 ${
-                 isExecuting ? "bg-emerald-800 opacity-70 cursor-not-allowed" : "bg-emerald-600 hover:bg-emerald-700 shadow-emerald-900/20"
+                 (isExecuting || nodes.length === 0) ? "bg-emerald-800 opacity-70 cursor-not-allowed" : "bg-emerald-600 hover:bg-emerald-700 shadow-emerald-900/20"
               }`}
             >
               <Play size={16} /> {isExecuting ? "Executing..." : "▶ Run Workflow"}

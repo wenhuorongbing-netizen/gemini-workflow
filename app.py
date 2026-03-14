@@ -512,6 +512,7 @@ async def run_workflow_engine(steps, workspace_id, stream_queue=None, profile_id
                 jules_url = step.get('chat_url', '')
                 try:
                     max_iterations = int(step.get('max_iterations', 3))
+                    max_iterations = max(1, min(10, max_iterations))
                 except ValueError:
                     max_iterations = 3
 
@@ -601,7 +602,7 @@ async def run_workflow_engine(steps, workspace_id, stream_queue=None, profile_id
                         error_msg = str(e)
                         if "BROWSER_CRASH" in error_msg:
                             # Context Recovery Logic
-                            if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Jules Error', 'message': '[FATAL] Memory Crash. Hard-restarting JulesBot context...', 'screen': 'right'})}\n\n"
+                            if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Jules Error', 'message': '💥 内存过载，系统正在为您自动重置环境...', 'screen': 'right'})}\n\n"
                             await jules_bot.quit()
 
                             # Initialize fresh bot
