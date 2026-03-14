@@ -378,9 +378,11 @@ async def index(request: Request):
 
 import uuid
 
-async def run_workflow_engine(steps, workspace_id, stream_queue=None, profile_id="1", run_variables=None):
+async def run_workflow_engine(steps, workspace_id, stream_queue=None, profile_id="1", run_variables=None, global_state=None):
     if run_variables is None:
         run_variables = {}
+    if global_state is None:
+        global_state = {}
     run_id = str(uuid.uuid4())
     page = None
     try:
@@ -407,6 +409,15 @@ async def run_workflow_engine(steps, workspace_id, stream_queue=None, profile_id
             step_type = step.get('type', 'standard')
             chat_url = step.get('chat_url', '').strip()
             show_result = step.get('show_result', True)
+            system_prompt = step.get('system_prompt', '').strip()
+
+            # Global Context State Injection (Blackboard)
+            for g_key, g_val in global_state.items():
+                g_tag = f"{{{{GLOBAL_{g_key}}}}}"
+                if g_tag in prompt_template:
+                    prompt_template = prompt_template.replace(g_tag, g_val)
+                if system_prompt and g_tag in system_prompt:
+                    system_prompt = system_prompt.replace(g_tag, g_val)
 
             # Global variable injection
             global_vars = load_globals()
@@ -489,8 +500,10 @@ async def run_workflow_engine(steps, workspace_id, stream_queue=None, profile_id
 
                 loop_result = ""
                 current_gemini_prompt = prompt_template
+                if system_prompt:
+                    current_gemini_prompt = f"System Instructions / Persona:\n{system_prompt}\n\nTask:\n{current_gemini_prompt}"
 
-                if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Agent Loop Started', 'message': 'Initializing Dual-Bot Engine...'})}\n\n"
+                if stream_queue: yield f"data: {{json.dumps({{'step': step_id, 'status': 'Agent Loop Started', 'message': 'Initializing Dual-Bot Engine...'}})}}\n\n"
 
                 jules_bot = JulesBot(profile_id=profile_id)
                 jules_page = None
@@ -502,6 +515,11 @@ async def run_workflow_engine(steps, workspace_id, stream_queue=None, profile_id
                     reset_threshold = int(step.get('reset_threshold', 3))
                 except ValueError:
                     reset_threshold = 3
+
+                try:
+                    stop_sequence = step.get('stop_sequence', 'FINAL_REVIEW_COMPLETE')
+                except Exception:
+                    stop_sequence = 'FINAL_REVIEW_COMPLETE'
 
                 for i in range(max_iterations):
                     if cancel_event and cancel_event.is_set():
@@ -539,8 +557,8 @@ async def run_workflow_engine(steps, workspace_id, stream_queue=None, profile_id
 
                     if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Gemini Output', 'message': gemini_response, 'screen': 'left'})}\n\n"
 
-                    # If Gemini outputs something indicating it's completely done, we could break early
-                    if "FINAL_REVIEW_COMPLETE" in gemini_response:
+                    # If Gemini outputs something indicating it's completely done, we break early
+                    if stop_sequence in gemini_response:
                         loop_result = gemini_response
                         break
 
@@ -893,6 +911,9 @@ async def run_workflow_engine(steps, workspace_id, stream_queue=None, profile_id
 
                             # Smart Context Injection: Replace {{OUTPUT_X}} and {{NODE_ID}} with actual results
                             final_prompt = prompt_template
+                            if system_prompt:
+                                final_prompt = f"System Instructions / Persona:\n{system_prompt}\n\nUser Request:\n{final_prompt}"
+
                             for past_id, past_output in results.items():
                                 tag = f"{{{{OUTPUT_{past_id}}}}}"
                                 if tag in final_prompt:
@@ -1094,6 +1115,15 @@ async def run_workflow_engine(steps, workspace_id, stream_queue=None, profile_id
             await page.close()
 
 
+
+@app.get("/stop")
+async def stop_workflow():
+    if cancel_event:
+        cancel_event.set()
+        logging.warning("User initiated manual stop.")
+        return JSONResponse({"status": "stopping"})
+    return JSONResponse({"status": "no active workflow"})
+
 @app.post("/execute")
 async def execute_workflow(request: Request):
     async def error_stream(msg: str):
@@ -1112,6 +1142,7 @@ async def execute_workflow(request: Request):
     workspace_id = data.get('workspace_id')
     profile_id = data.get('profile_id', '1')
     run_variables = data.get('run_variables', {})
+    global_state = data.get('global_state', {})
 
     if not steps:
         return StreamingResponse(error_stream("No steps provided in workflow."), media_type="text/event-stream")
@@ -1130,7 +1161,7 @@ async def execute_workflow(request: Request):
 
     async def sse_wrapper():
         try:
-            async for event in run_workflow_engine(steps, workspace_id, stream_queue, profile_id, run_variables):
+            async for event in run_workflow_engine(steps, workspace_id, stream_queue, profile_id, run_variables, global_state):
                 yield event
         finally:
             bot_semaphore.release()

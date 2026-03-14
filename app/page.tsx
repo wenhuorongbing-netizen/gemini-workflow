@@ -18,7 +18,7 @@ import {
   BackgroundVariant
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { Play, Bot, Globe, Repeat, FileJson, Loader2, CheckCircle2, XCircle } from "lucide-react";
+import { Play, Bot, Globe, Repeat, FileJson, Loader2, CheckCircle2, XCircle, Database } from "lucide-react";
 
 interface Workspace {
   id: string;
@@ -75,6 +75,10 @@ const ScraperNode = ({ data }: any) => (
   <BaseNode data={data} icon={Globe} title="Web Scraper" content={data.url || "https://..."} bgColor="bg-amber-900" borderColor="border-amber-700" />
 );
 
+const StateNode = ({ data }: any) => (
+  <BaseNode data={data} icon={Database} title="Global State" content={`${data.varName || "VAR_NAME"} = ${data.defaultValue || "..."}`} bgColor="bg-slate-700" borderColor="border-slate-500" />
+);
+
 const AgentLoopNode = ({ data }: any) => (
   <BaseNode data={data} icon={Repeat} title="Agentic Loop" content={`Target: ${data.url || "None"}`} bgColor="bg-purple-900" borderColor="border-purple-700" />
 );
@@ -84,6 +88,7 @@ const nodeTypes = {
   gemini: GeminiNode,
   scraper: ScraperNode,
   agentic_loop: AgentLoopNode,
+  state: StateNode,
 };
 
 const initialNodes: Node[] = [
@@ -137,6 +142,7 @@ function compileNodesToSteps(nodes: Node[], edges: Edge[]) {
         const base = {
             type: n.type === 'gemini' ? 'standard' : n.type,
             prompt: n.data.prompt || n.data.url || '',
+            system_prompt: n.data.systemPrompt || '',
             new_chat: n.data.new_chat || false,
             show_result: true,
         };
@@ -147,7 +153,8 @@ function compileNodesToSteps(nodes: Node[], edges: Edge[]) {
                 id: n.id,
                 chat_url: n.data.url || '',
                 max_iterations: n.data.max_iterations || 3,
-                reset_threshold: n.data.reset_threshold || 3
+                reset_threshold: n.data.reset_threshold || 3,
+                stop_sequence: n.data.stop_sequence || 'FINAL_REVIEW_COMPLETE'
             };
         }
         return { ...base, id: n.id };
@@ -199,6 +206,20 @@ export default function AppShell() {
 
     return () => clearTimeout(timeoutId);
   }, [nodes, edges, selectedWorkspace]);
+
+  // Animated Edges Logic
+  useEffect(() => {
+      if (isExecuting) {
+          const runningNodes = new Set(nodes.filter(n => n.data?.executionStatus === 'running').map(n => n.id));
+          setEdges(eds => eds.map(e => ({
+              ...e,
+              animated: runningNodes.has(e.source) || runningNodes.has(e.target)
+          })));
+      } else {
+          // Turn off animations when not executing
+          setEdges(eds => eds.map(e => ({ ...e, animated: false })));
+      }
+  }, [nodes, isExecuting]);
 
   const saveWorkflowSilent = async () => {
     if (!selectedWorkspace) return;
@@ -351,11 +372,19 @@ export default function AppShell() {
       // Reset all node statuses
       setNodes(nds => nds.map(n => ({...n, data: {...n.data, executionStatus: 'idle'}})));
 
+      const stateNodes = nodes.filter(n => n.type === 'state');
+      const global_state: Record<string, string> = {};
+      stateNodes.forEach(n => {
+          if (n.data.varName) {
+              global_state[n.data.varName as string] = n.data.defaultValue as string || '';
+          }
+      });
+
       try {
         const response = await fetch("http://127.0.0.1:8000/execute", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ steps: compiledSteps, workspace_id: selectedWorkspace?.id || "temp", profile_id: "1" })
+          body: JSON.stringify({ steps: compiledSteps, workspace_id: selectedWorkspace?.id || "temp", profile_id: "1", global_state })
         });
 
         if (!response.ok) {
@@ -555,6 +584,7 @@ export default function AppShell() {
                 <button onClick={() => addNode('gemini')} className="px-3 py-1.5 bg-white border border-slate-300 rounded text-sm font-medium hover:bg-blue-50 text-blue-700 transition flex items-center gap-1"><Bot size={14}/> Gemini AI</button>
                 <button onClick={() => addNode('scraper')} className="px-3 py-1.5 bg-white border border-slate-300 rounded text-sm font-medium hover:bg-amber-50 text-amber-700 transition flex items-center gap-1"><Globe size={14}/> Web Scraper</button>
                 <button onClick={() => addNode('agentic_loop')} className="px-3 py-1.5 bg-white border border-slate-300 rounded text-sm font-medium hover:bg-purple-50 text-purple-700 transition flex items-center gap-1"><Repeat size={14}/> Agent Loop</button>
+                <button onClick={() => addNode('state')} className="px-3 py-1.5 bg-white border border-slate-300 rounded text-sm font-medium hover:bg-slate-200 text-slate-700 transition flex items-center gap-1"><Database size={14}/> Global State</button>
             </div>
         )}
 
@@ -596,7 +626,21 @@ export default function AppShell() {
                              {isExecuting ? <Loader2 size={14} className="animate-spin text-blue-500"/> : <CheckCircle2 size={14} className="text-emerald-500"/>}
                              Execution Telemetry
                          </div>
-                         <button onClick={() => setLogs([])} className="text-slate-500 hover:text-slate-300 transition-colors">✕</button>
+                         <div className="flex items-center gap-3">
+                             {isExecuting && (
+                                <button
+                                    onClick={async () => {
+                                        try {
+                                            await fetch("http://127.0.0.1:8000/stop");
+                                        } catch (e) {}
+                                    }}
+                                    className="text-xs bg-rose-500/20 hover:bg-rose-500/30 text-rose-400 px-2 py-1 rounded transition flex items-center gap-1 font-bold"
+                                >
+                                    <XCircle size={12}/> Stop Execution
+                                </button>
+                             )}
+                             <button onClick={() => setLogs([])} className="text-slate-500 hover:text-slate-300 transition-colors">✕</button>
+                         </div>
                      </div>
                      <div className="flex-1 overflow-y-auto p-4 space-y-3 font-mono text-xs">
                          {logs.map((log, i) => (
@@ -629,38 +673,51 @@ export default function AppShell() {
                        </div>
 
                        {node.type === 'gemini' && (
-                         <div>
-                           <div className="flex justify-between items-center mb-1">
-                             <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider">Prompt</label>
+                         <div className="space-y-4">
+                           <div>
+                             <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">System Prompt (Persona)</label>
+                             <textarea
+                               className="w-full h-20 px-3 py-2 border border-slate-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                               value={node.data.systemPrompt as string || ''}
+                               onChange={(e) => updateNodeData(node.id, { systemPrompt: e.target.value })}
+                               disabled={isPlaybackMode}
+                               placeholder="e.g., You are a senior code reviewer..."
+                             />
+                           </div>
+                           <div>
+                             <div className="flex justify-between items-center mb-1">
+                               <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider">User Prompt</label>
 
-                             <div className="relative group">
-                               <button className="text-xs bg-slate-200 hover:bg-blue-100 text-blue-700 px-2 py-0.5 rounded transition">
-                                 + Insert Variable
-                               </button>
-                               <div className="absolute right-0 top-full mt-1 w-48 bg-white border border-slate-200 rounded-md shadow-xl opacity-0 group-hover:opacity-100 pointer-events-none group-hover:pointer-events-auto transition-opacity z-50 p-1 flex flex-col gap-1 max-h-48 overflow-y-auto">
-                                 {nodes.filter(n => n.id !== node.id).map(n => (
-                                   <button
-                                     key={n.id}
-                                     onClick={() => {
-                                       const newVal = (node.data.prompt || '') + ` {{${n.id}}}`;
-                                       updateNodeData(node.id, { prompt: newVal });
-                                     }}
-                                     className="text-left text-xs px-2 py-1.5 hover:bg-slate-100 rounded text-slate-700 truncate"
-                                   >
-                                     <span className="font-semibold">{n.type}</span>: {String(n.data.prompt || n.data.url || 'Node')}
-                                   </button>
-                                 ))}
-                                 {nodes.length <= 1 && <div className="text-xs text-slate-400 p-2 text-center">No other nodes</div>}
+                               <div className="relative group">
+                                 <button className="text-xs bg-slate-200 hover:bg-blue-100 text-blue-700 px-2 py-0.5 rounded transition">
+                                   + Insert Variable
+                                 </button>
+                                 <div className="absolute right-0 top-full mt-1 w-48 bg-white border border-slate-200 rounded-md shadow-xl opacity-0 group-hover:opacity-100 pointer-events-none group-hover:pointer-events-auto transition-opacity z-50 p-1 flex flex-col gap-1 max-h-48 overflow-y-auto">
+                                   {nodes.filter(n => n.id !== node.id).map(n => (
+                                     <button
+                                       key={n.id}
+                                       onClick={() => {
+                                         const newVal = (node.data.prompt || '') + ` {{${n.id}}}`;
+                                         updateNodeData(node.id, { prompt: newVal });
+                                       }}
+                                       className="text-left text-xs px-2 py-1.5 hover:bg-slate-100 rounded text-slate-700 truncate"
+                                       disabled={isPlaybackMode}
+                                     >
+                                       <span className="font-semibold">{n.type}</span>: {String(n.data.prompt || n.data.url || 'Node')}
+                                     </button>
+                                   ))}
+                                   {nodes.length <= 1 && <div className="text-xs text-slate-400 p-2 text-center">No other nodes</div>}
+                                 </div>
                                </div>
                              </div>
+                             <textarea
+                               className="w-full h-32 px-3 py-2 border border-slate-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                               value={node.data.prompt as string || ''}
+                               onChange={(e) => updateNodeData(node.id, { prompt: e.target.value })}
+                               disabled={isPlaybackMode}
+                               placeholder="Enter AI prompt... Use {{NODE_ID}} to inject previous outputs."
+                             />
                            </div>
-                           <textarea
-                             className="w-full h-48 px-3 py-2 border border-slate-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                             value={node.data.prompt as string || ''}
-                             onChange={(e) => updateNodeData(node.id, { prompt: e.target.value })}
-                             disabled={isPlaybackMode}
-                             placeholder="Enter AI prompt... Use {{NODE_ID}} to inject previous outputs."
-                           />
                          </div>
                        )}
 
@@ -716,7 +773,48 @@ export default function AppShell() {
                              />
                              <p className="text-[10px] text-slate-500 mt-1">Clears DOM every N steps to prevent crashing.</p>
                            </div>
+                           <div>
+                             <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Stop Sequence</label>
+                             <input
+                               type="text"
+                               className="w-full px-3 py-2 border border-slate-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-rose-500 focus:border-rose-500"
+                               value={node.data.stop_sequence as string || 'FINAL_REVIEW_COMPLETE'}
+                               onChange={(e) => updateNodeData(node.id, { stop_sequence: e.target.value })}
+                               disabled={isPlaybackMode}
+                               placeholder="e.g., DONE"
+                             />
+                             <p className="text-[10px] text-slate-500 mt-1">If Gemini outputs this string, the loop finishes immediately.</p>
+                           </div>
                          </>
+                       )}
+
+                       {node.type === 'state' && (
+                         <div className="space-y-4">
+                           <div>
+                             <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Variable Name</label>
+                             <input
+                               type="text"
+                               className="w-full px-3 py-2 border border-slate-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-slate-500 focus:border-slate-500"
+                               value={node.data.varName as string || ''}
+                               onChange={(e) => updateNodeData(node.id, { varName: e.target.value.toUpperCase().replace(/[^A-Z0-9_]/g, '') })}
+                               disabled={isPlaybackMode}
+                               placeholder="e.g., USER_PREFS"
+                             />
+                           </div>
+                           <div>
+                             <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Default Value</label>
+                             <textarea
+                               className="w-full h-24 px-3 py-2 border border-slate-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-slate-500 focus:border-slate-500"
+                               value={node.data.defaultValue as string || ''}
+                               onChange={(e) => updateNodeData(node.id, { defaultValue: e.target.value })}
+                               disabled={isPlaybackMode}
+                               placeholder="Enter default text or JSON..."
+                             />
+                           </div>
+                           <div className="text-xs text-slate-500 italic">
+                             Use {`{{GLOBAL_VAR_NAME}}`} in any prompt downstream to inject this value.
+                           </div>
+                         </div>
                        )}
 
                        {node.type === 'trigger' && (
