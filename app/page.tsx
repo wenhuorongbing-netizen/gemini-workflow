@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import {
   ReactFlow,
   Controls,
@@ -18,7 +18,7 @@ import {
   BackgroundVariant
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { Play, Bot, Globe, Repeat, FileJson } from "lucide-react";
+import { Play, Bot, Globe, Repeat, FileJson, Loader2, CheckCircle2, XCircle } from "lucide-react";
 
 interface Workspace {
   id: string;
@@ -28,34 +28,55 @@ interface Workspace {
 
 // --- Custom Nodes ---
 
-const BaseNode = ({ icon: Icon, title, content, bgColor, borderColor }: any) => (
-  <div className={`w-[280px] rounded-lg shadow-lg border-2 ${borderColor} ${bgColor} overflow-hidden text-slate-50 flex flex-col`}>
-    <Handle type="target" position={Position.Top} className="w-3 h-3 !bg-slate-300" />
-    <div className={`px-4 py-2 border-b ${borderColor} flex items-center gap-2 font-semibold tracking-wide bg-opacity-20 bg-black`}>
-      <Icon size={18} />
-      <span>{title}</span>
+const BaseNode = ({ icon: Icon, title, content, bgColor, borderColor, data }: any) => {
+  const status = data?.executionStatus || 'idle';
+
+  let statusClasses = "";
+  let StatusIcon = null;
+
+  if (status === 'running') {
+      statusClasses = "ring-2 ring-blue-500 shadow-[0_0_15px_rgba(59,130,246,0.5)]";
+      StatusIcon = Loader2;
+  } else if (status === 'success') {
+      statusClasses = "ring-2 ring-emerald-500 shadow-[0_0_15px_rgba(16,185,129,0.3)] border-emerald-500";
+      StatusIcon = CheckCircle2;
+  } else if (status === 'error') {
+      statusClasses = "ring-2 ring-rose-500 shadow-[0_0_15px_rgba(244,63,94,0.3)] border-rose-500";
+      StatusIcon = XCircle;
+  }
+
+  return (
+    <div className={`w-[280px] rounded-lg shadow-lg border-2 ${borderColor} ${bgColor} ${statusClasses} transition-all duration-300 overflow-hidden text-slate-50 flex flex-col`}>
+      <Handle type="target" position={Position.Top} className="w-3 h-3 !bg-slate-300" />
+      <div className={`px-4 py-2 border-b ${borderColor} flex justify-between items-center font-semibold tracking-wide bg-opacity-20 bg-black`}>
+        <div className="flex items-center gap-2">
+            <Icon size={18} />
+            <span>{title}</span>
+        </div>
+        {StatusIcon && <StatusIcon size={16} className={status === 'running' ? 'animate-spin text-blue-400' : status === 'success' ? 'text-emerald-400' : 'text-rose-400'} />}
+      </div>
+      <div className="p-4 flex-1 text-sm bg-slate-900/50">
+        <div className="text-slate-300 truncate">{content}</div>
+      </div>
+      <Handle type="source" position={Position.Bottom} className="w-3 h-3 !bg-slate-300" />
     </div>
-    <div className="p-4 flex-1 text-sm bg-slate-900/50">
-      <div className="text-slate-300 truncate">{content}</div>
-    </div>
-    <Handle type="source" position={Position.Bottom} className="w-3 h-3 !bg-slate-300" />
-  </div>
-);
+  );
+};
 
 const TriggerNode = ({ data }: any) => (
-  <BaseNode icon={Play} title="Trigger" content={data.label || "Manual Run"} bgColor="bg-emerald-900" borderColor="border-emerald-700" />
+  <BaseNode data={data} icon={Play} title="Trigger" content={data.label || "Manual Run"} bgColor="bg-emerald-900" borderColor="border-emerald-700" />
 );
 
 const GeminiNode = ({ data }: any) => (
-  <BaseNode icon={Bot} title="Gemini AI" content={data.prompt || "Enter prompt..."} bgColor="bg-blue-900" borderColor="border-blue-700" />
+  <BaseNode data={data} icon={Bot} title="Gemini AI" content={data.prompt || "Enter prompt..."} bgColor="bg-blue-900" borderColor="border-blue-700" />
 );
 
 const ScraperNode = ({ data }: any) => (
-  <BaseNode icon={Globe} title="Web Scraper" content={data.url || "https://..."} bgColor="bg-amber-900" borderColor="border-amber-700" />
+  <BaseNode data={data} icon={Globe} title="Web Scraper" content={data.url || "https://..."} bgColor="bg-amber-900" borderColor="border-amber-700" />
 );
 
 const AgentLoopNode = ({ data }: any) => (
-  <BaseNode icon={Repeat} title="Agentic Loop" content={`Target: ${data.url || "None"}`} bgColor="bg-purple-900" borderColor="border-purple-700" />
+  <BaseNode data={data} icon={Repeat} title="Agentic Loop" content={`Target: ${data.url || "None"}`} bgColor="bg-purple-900" borderColor="border-purple-700" />
 );
 
 const nodeTypes = {
@@ -112,7 +133,7 @@ function compileNodesToSteps(nodes: Node[], edges: Edge[]) {
     const actionNodes = sortedIds.map(id => nodeMap[id]).filter(n => n.type !== 'trigger');
 
     // Map to app.py schema
-    return actionNodes.map(n => {
+    const steps = actionNodes.map(n => {
         const base = {
             type: n.type === 'gemini' ? 'standard' : n.type,
             prompt: n.data.prompt || n.data.url || '',
@@ -129,6 +150,8 @@ function compileNodesToSteps(nodes: Node[], edges: Edge[]) {
         }
         return base;
     });
+
+    return { steps, nodeOrder: actionNodes.map(n => n.id) };
 }
 
 // --- Main App Shell ---
@@ -144,6 +167,12 @@ export default function AppShell() {
   const [edges, setEdges] = useState<Edge[]>(initialEdges);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [isExecuting, setIsExecuting] = useState(false);
+  const [logs, setLogs] = useState<{status: string, message: string}[]>([]);
+  const logsEndRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [logs]);
 
   const onNodeClick = useCallback((_: any, node: Node) => {
     setSelectedNodeId(node.id);
@@ -213,10 +242,15 @@ export default function AppShell() {
   };
 
   const handleRun = async () => {
-      const compiledSteps = compileNodesToSteps(nodes, edges);
+      const { steps: compiledSteps, nodeOrder } = compileNodesToSteps(nodes, edges);
       console.log("Compiled JSON Payload for app.py:", compiledSteps);
 
+      setLogs([]); // Clear previous logs
       setIsExecuting(true);
+
+      // Reset all node statuses
+      setNodes(nds => nds.map(n => ({...n, data: {...n.data, executionStatus: 'idle'}})));
+
       try {
         const response = await fetch("http://127.0.0.1:8000/execute", {
           method: "POST",
@@ -224,11 +258,70 @@ export default function AppShell() {
           body: JSON.stringify({ steps: compiledSteps, workspace_id: selectedWorkspace?.id || "temp", profile_id: "1" })
         });
 
-        if (response.ok) {
-           alert("Workflow triggered successfully in backend!");
-        } else {
+        if (!response.ok) {
            const err = await response.json();
            alert("Failed to start workflow: " + (err.error || "Unknown error"));
+           setIsExecuting(false);
+           return;
+        }
+
+        const reader = response.body?.getReader();
+        if (!reader) throw new Error("No response body reader.");
+        const decoder = new TextDecoder("utf-8");
+        let buffer = "";
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            buffer += decoder.decode(value, { stream: true });
+            const events = buffer.split('\n\n');
+            buffer = events.pop() || "";
+
+            for (let evt of events) {
+                if (evt.startsWith('data: ')) {
+                    const dataStr = evt.substring(6);
+                    if (!dataStr) continue;
+
+                    try {
+                        const data = JSON.parse(dataStr);
+
+                        if (data.status) {
+                            setLogs(prev => [...prev, { status: data.status, message: data.message || data.result || "" }]);
+                        }
+
+                        if (data.step) {
+                            // Map step ID (1-based index) to React Flow node ID
+                            const targetNodeId = nodeOrder[data.step - 1];
+                            if (targetNodeId) {
+                                let statusToSet = 'running';
+                                if (data.status === 'Complete') statusToSet = 'success';
+                                if (data.status === 'Error' || data.status === 'Canceled') statusToSet = 'error';
+
+                                setNodes(nds =>
+                                    nds.map(n => {
+                                        if (n.id === targetNodeId) {
+                                            // Only upgrade status (don't downgrade success/error back to running)
+                                            const currentStatus = n.data.executionStatus;
+                                            if (currentStatus === 'success' || currentStatus === 'error') {
+                                                return n;
+                                            }
+                                            return { ...n, data: { ...n.data, executionStatus: statusToSet } };
+                                        }
+                                        return n;
+                                    })
+                                );
+                            }
+                        }
+
+                        if (data.status === 'Workflow Finished' || data.status === 'Error' || data.status === 'Canceled') {
+                            setIsExecuting(false);
+                        }
+                    } catch (e) {
+                        console.error("Error parsing chunk:", e);
+                    }
+                }
+            }
         }
       } catch (error: any) {
         alert("Network Error: " + error.message);
@@ -360,6 +453,31 @@ export default function AppShell() {
                 <Background variant={BackgroundVariant.Dots} gap={16} size={1} color="#334155" />
                 <Controls className="bg-slate-800 text-white border-slate-700 fill-white" />
              </ReactFlow>
+
+             {/* Floating Execution Log Panel */}
+             {logs.length > 0 && (
+                 <div className="absolute bottom-6 left-6 w-[400px] h-[300px] bg-slate-900 border border-slate-700 rounded-xl shadow-[0_10px_40px_-10px_rgba(0,0,0,0.8)] z-30 flex flex-col overflow-hidden text-slate-300 transition-all">
+                     <div className="px-4 py-3 border-b border-slate-800 bg-slate-950 flex justify-between items-center shrink-0">
+                         <div className="font-semibold text-sm flex items-center gap-2">
+                             {isExecuting ? <Loader2 size={14} className="animate-spin text-blue-500"/> : <CheckCircle2 size={14} className="text-emerald-500"/>}
+                             Execution Telemetry
+                         </div>
+                         <button onClick={() => setLogs([])} className="text-slate-500 hover:text-slate-300 transition-colors">✕</button>
+                     </div>
+                     <div className="flex-1 overflow-y-auto p-4 space-y-3 font-mono text-xs">
+                         {logs.map((log, i) => (
+                             <div key={i} className="flex flex-col gap-1 border-b border-slate-800/50 pb-2 last:border-0">
+                                 <span className={`font-bold uppercase tracking-wider ${
+                                     log.status === 'Error' || log.status === 'Jules Error' ? 'text-rose-500' :
+                                     log.status === 'Complete' || log.status === 'Workflow Finished' ? 'text-emerald-500' : 'text-blue-400'
+                                 }`}>[{log.status}]</span>
+                                 <span className="text-slate-400 whitespace-pre-wrap">{log.message}</span>
+                             </div>
+                         ))}
+                         <div ref={logsEndRef} />
+                     </div>
+                 </div>
+             )}
 
              {/* Properties Panel */}
              {selectedNodeId && (
