@@ -1410,20 +1410,38 @@
                             try {
                                 const data = JSON.parse(dataStr);
 
-                                if (data.status === 'Gemini Output' || data.status === 'Gemini Working') {
+                                if (data.status === 'Gemini Output' || data.status === 'Gemini Working' || data.status === 'Agent Loop Checkpoint') {
                                     const div = document.createElement('div');
                                     div.className = 'agent-log-entry';
-                                    div.innerHTML = `<strong>${data.status}:</strong><br>` + DOMPurify.sanitize(marked.parse(data.message || data.result || ''));
+                                    let content = data.message || data.result || '';
+                                    if (content.includes('[TELEMETRY]')) {
+                                        div.style.color = '#7f8c8d';
+                                        div.style.fontSize = '0.9em';
+                                        div.innerHTML = `<em>${content.replace('[TELEMETRY]', '🔄')}</em>`;
+                                    } else {
+                                        div.innerHTML = `<strong>${data.status}:</strong><br>` + DOMPurify.sanitize(marked.parse(content));
+                                    }
                                     geminiLog.appendChild(div);
                                     geminiLog.scrollTop = geminiLog.scrollHeight;
                                 }
                                 else if (data.status === 'Jules Output' || data.status === 'Jules Working' || data.status === 'Jules Error') {
                                     const div = document.createElement('div');
                                     div.className = 'agent-log-entry';
-                                    div.innerHTML = `<strong>${data.status}:</strong><br>` + DOMPurify.sanitize(marked.parse(data.message || data.result || ''));
+                                    let content = data.message || data.result || '';
+                                    if (content.includes('[TELEMETRY]')) {
+                                        div.style.color = '#7f8c8d';
+                                        div.style.fontSize = '0.9em';
+                                        div.innerHTML = `<em>${content.replace('[TELEMETRY]', '🤖')}</em>`;
+                                    } else {
+                                        if (data.status === 'Jules Error') {
+                                            div.style.color = '#e74c3c';
+                                        }
+                                        div.innerHTML = `<strong>${data.status}:</strong><br>` + DOMPurify.sanitize(marked.parse(content));
+                                    }
                                     julesLog.appendChild(div);
                                     julesLog.scrollTop = julesLog.scrollHeight;
                                 }
+
                                 else if (data.status === 'Workflow Finished' || data.status === 'Complete') {
                                     const div = document.createElement('div');
                                     div.className = 'agent-log-entry';

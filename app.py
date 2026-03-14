@@ -495,9 +495,20 @@ async def run_workflow_engine(steps, workspace_id, stream_queue=None, profile_id
                 jules_bot = JulesBot(profile_id=profile_id)
                 jules_page = None
 
+                # We need accumulated context to pass across reset boundaries
+                accumulated_context = "Task: " + current_gemini_prompt
+
                 for i in range(max_iterations):
                     if cancel_event and cancel_event.is_set():
                         break
+
+                    # --- Context Reset (Prevent DOM Bloat) ---
+                    if i > 0 and i % 3 == 0:
+                        if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Agent Loop Checkpoint', 'message': '[TELEMETRY] Routine context reset to prevent DOM bloat. Initializing new chat context...', 'screen': 'left'})}\n\n"
+                        # We don't just reload the current page, we explicitly start a new chat
+                        # and pass the summarized context to re-ground Gemini without the 3-turn heavy DOM
+                        await current_bot.start_new_chat(page)
+                        current_gemini_prompt = f"We are continuing a task. Here is the context so far:\n{accumulated_context}\n\nResume the review and next steps."
 
                     if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Gemini Working', 'message': f'Iteration {i+1}: Gemini generating coding prompt...', 'screen': 'left'})}\n\n"
 
@@ -519,6 +530,8 @@ async def run_workflow_engine(steps, workspace_id, stream_queue=None, profile_id
                     await current_bot.wait_for_response(page, timeout=300000, poll_callback=gemini_poll_cb)
                     gemini_response = await current_bot.get_last_response(page)
 
+                    accumulated_context += f"\n\nGemini: {gemini_response}"
+
                     if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Gemini Output', 'message': gemini_response, 'screen': 'left'})}\n\n"
 
                     # If Gemini outputs something indicating it's completely done, we could break early
@@ -535,17 +548,29 @@ async def run_workflow_engine(steps, workspace_id, stream_queue=None, profile_id
 
                     jules_response = ""
                     try:
-                        jules_page = await jules_bot.create_new_page()
-                        await jules_bot.send_task(jules_page, jules_url, gemini_response)
+                        # Attempt to use existing page to save overhead, if not create one
+                        if not jules_page or jules_page.is_closed():
+                            jules_page = await jules_bot.create_new_page()
 
-                        jules_response = await jules_bot.poll_for_completion(jules_page)
+                        await jules_bot.send_task(jules_page, jules_url, gemini_response, stream_queue=stream_queue, step_id=step_id)
+
+                        jules_response = await jules_bot.poll_for_completion(jules_page, stream_queue=stream_queue, step_id=step_id)
+
                         if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Jules Output', 'message': jules_response, 'screen': 'right'})}\n\n"
                     except Exception as e:
-                        jules_response = f"Jules Error: {str(e)}"
-                        if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Jules Error', 'message': jules_response, 'screen': 'right'})}\n\n"
-                    finally:
-                        if jules_page:
-                            await jules_page.close()
+                        error_msg = str(e)
+                        if "BROWSER_CRASH" in error_msg:
+                            # Context Recovery Logic
+                            if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Jules Error', 'message': '[FATAL] Memory Crash. Hard-restarting JulesBot context...', 'screen': 'right'})}\n\n"
+                            await jules_bot.quit()
+                            # It will auto-initialize on next create_new_page in the next loop iteration
+                            jules_page = None
+                            jules_response = "Jules experienced a system crash and was rebooted. Please resend the instructions."
+                        else:
+                            jules_response = f"Jules Error: {error_msg}"
+                            if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Jules Error', 'message': jules_response, 'screen': 'right'})}\n\n"
+
+                    accumulated_context += f"\n\nJules: {jules_response}"
 
                     # 3. Next iteration prompt
                     current_gemini_prompt = f"Jules has finished with the following output/status: {jules_response}\n\nPlease review this. If everything is correct and no further coding is needed, reply with 'FINAL_REVIEW_COMPLETE'. Otherwise, provide the next set of coding instructions for Jules."

@@ -276,54 +276,129 @@ class JulesBot:
             await self.initialize()
         return await self.context.new_page()
 
-    async def send_task(self, page: Page, url: str, prompt: str):
+    async def send_task(self, page: Page, url: str, prompt: str, stream_queue=None, step_id=None):
         """
         Navigates to the target URL and submits the prompt to Jules.
         """
-        try:
-            logging.info(f"Navigating to Jules target URL: {url}")
-            await page.goto(url, wait_until="domcontentloaded")
+        import json
+        import asyncio
+        from playwright.async_api import expect, TimeoutError as PlaywrightTimeoutError
 
+        async def emit(msg):
+            if stream_queue and step_id:
+                await stream_queue.put(f"data: {json.dumps({'step': step_id, 'status': 'Jules Working', 'message': f'[TELEMETRY] {msg}', 'screen': 'right'})}\n\n")
+
+        try:
+            await emit(f"Navigating to Jules target URL: {url}...")
+            logging.info(f"Navigating to Jules target URL: {url}")
+
+            try:
+                await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                await emit("Page loaded successfully.")
+            except PlaywrightTimeoutError:
+                await emit("Network seems slow, checking status... Retrying navigation.")
+                await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+
+            await emit("Locating input field...")
             input_box = page.locator("textarea").first
-            await input_box.wait_for(state="visible", timeout=20000)
+
+            try:
+                await input_box.wait_for(state="visible", timeout=20000)
+            except PlaywrightTimeoutError:
+                await emit("Timeout waiting for element, retrying...")
+                await asyncio.sleep(2)
+                await input_box.wait_for(state="visible", timeout=20000)
+
             await input_box.fill(prompt)
+            await emit("Prompt entered into Jules interface.")
             logging.info("Entered prompt into Jules.")
 
+            # Submission Check
+            await emit("Pressing Enter to submit task...")
             await page.keyboard.press("Enter")
+
+            # Verify submission by checking if input box clears or becomes disabled
+            try:
+                await expect(input_box).to_be_empty(timeout=5000)
+                await emit("Input box cleared, submission successful.")
+            except:
+                await emit("Input box didn't clear immediately, assuming submission via DOM change...")
+
+            await emit("Prompt submitted, waiting for generation...")
             logging.info("Submitted prompt to Jules.")
 
         except Exception as e:
-            error_msg = f"Error sending task to Jules: {e}"
-            logging.error(error_msg)
-            raise Exception(error_msg)
+            if "Target closed" in str(e):
+                error_msg = "[FATAL] Browser crashed due to memory. Attempting recovery..."
+                await emit(error_msg)
+                logging.error(error_msg)
+                # Let the caller handle the restart
+                raise Exception("BROWSER_CRASH")
+            else:
+                error_msg = f"Error sending task to Jules: {e}"
+                await emit(f"[ERROR] {error_msg}")
+                logging.error(error_msg)
+                raise Exception(error_msg)
 
-    async def poll_for_completion(self, page: Page) -> str:
+    async def poll_for_completion(self, page: Page, stream_queue=None, step_id=None) -> str:
         """
-        Polls the DOM for the 'Ready for review' text indicating completion.
-        Uses asyncio.sleep(15) to be non-blocking.
+        Polls the DOM dynamically for completion and extracts result.
         """
-        logging.info("Polling Jules for 'Ready for review'...")
-        max_polls = 40 # 10 minutes max (40 * 15s)
+        import json
+        import asyncio
+        from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+
+        async def emit(msg):
+            if stream_queue and step_id:
+                await stream_queue.put(f"data: {json.dumps({'step': step_id, 'status': 'Jules Working', 'message': f'[TELEMETRY] {msg}', 'screen': 'right'})}\n\n")
+
+        logging.info("Waiting for Jules to finish...")
+        await emit("Waiting for Jules to finish generation...")
+
+        max_polls = 120 # 10 minutes total waiting
         poll_count = 0
 
         while poll_count < max_polls:
-            await asyncio.sleep(15)
             poll_count += 1
 
             try:
-                # Check for completion text
-                if await page.locator("text='Ready for review'").is_visible():
+                # Dynamic wait for 5 seconds per tick instead of hard sleep
+                try:
+                    # Multi-Factor trigger: check for Ready for review
+                    await page.locator("text='Ready for review'").wait_for(state="visible", timeout=5000)
+
+                    await emit("Detected 'Ready for review' text.")
                     logging.info("Jules reported 'Ready for review'.")
+
+                    # Verify network is idle to ensure no lingering requests (Multi-Factor)
+                    await emit("Waiting for network to become idle...")
+                    try:
+                        await page.wait_for_load_state("networkidle", timeout=10000)
+                    except PlaywrightTimeoutError:
+                        await emit("Network idle timeout, proceeding with DOM extraction anyway...")
 
                     body_text = await page.inner_text("body")
                     # Extract branch link using regex
                     import re
                     match = re.search(r'(https://github\.com/\S+/tree/\S+)', body_text)
                     if match:
-                        return f"Jules finished. Branch link: {match.group(1)}"
+                        link = match.group(1)
+                        await emit(f"Extracted branch link: {link}")
+                        return f"Jules finished. Branch link: {link}"
                     return "Jules finished successfully. Status: Ready for review."
+                except PlaywrightTimeoutError:
+                    if poll_count % 6 == 0: # Every 30 seconds
+                        await emit(f"Still waiting for completion... (Tick {poll_count}/{max_polls})")
+                    continue
+
             except Exception as e:
-                logging.debug(f"Error during Jules polling check: {e}")
+                if "Target closed" in str(e):
+                    error_msg = "[FATAL] Browser crashed due to memory. Attempting recovery..."
+                    await emit(error_msg)
+                    logging.error(error_msg)
+                    raise Exception("BROWSER_CRASH")
+                else:
+                    logging.debug(f"Error during Jules polling check: {e}")
 
         raise Exception("Timeout waiting for Jules to complete task.")
 
