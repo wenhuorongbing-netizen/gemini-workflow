@@ -142,6 +142,28 @@ export default function AppShell() {
   // React Flow State
   const [nodes, setNodes] = useState<Node[]>(initialNodes);
   const [edges, setEdges] = useState<Edge[]>(initialEdges);
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [isExecuting, setIsExecuting] = useState(false);
+
+  const onNodeClick = useCallback((_: any, node: Node) => {
+    setSelectedNodeId(node.id);
+  }, []);
+
+  const onPaneClick = useCallback(() => {
+    setSelectedNodeId(null);
+  }, []);
+
+  const updateNodeData = (id: string, newData: any) => {
+    setNodes((nds) =>
+      nds.map((node) => {
+        if (node.id === id) {
+          return { ...node, data: { ...node.data, ...newData } };
+        }
+        return node;
+      })
+    );
+  };
+
 
   const onNodesChange = useCallback(
     (changes: NodeChange[]) => setNodes((nds) => applyNodeChanges(changes, nds)),
@@ -190,10 +212,29 @@ export default function AppShell() {
     setNodes((nds) => [...nds, newNode]);
   };
 
-  const handleCompile = () => {
+  const handleRun = async () => {
       const compiledSteps = compileNodesToSteps(nodes, edges);
       console.log("Compiled JSON Payload for app.py:", compiledSteps);
-      alert("Compiled Steps Payload logged to console!\\n\\n" + JSON.stringify(compiledSteps, null, 2));
+
+      setIsExecuting(true);
+      try {
+        const response = await fetch("http://127.0.0.1:8000/execute", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ steps: compiledSteps, workspace_id: selectedWorkspace?.id || "temp", profile_id: "1" })
+        });
+
+        if (response.ok) {
+           alert("Workflow triggered successfully in backend!");
+        } else {
+           const err = await response.json();
+           alert("Failed to start workflow: " + (err.error || "Unknown error"));
+        }
+      } catch (error: any) {
+        alert("Network Error: " + error.message);
+      } finally {
+        setIsExecuting(false);
+      }
   };
 
   return (
@@ -269,16 +310,23 @@ export default function AppShell() {
 
           <div className="flex items-center space-x-3">
             <button
-              onClick={handleCompile}
+              onClick={() => {
+                const compiledSteps = compileNodesToSteps(nodes, edges);
+                console.log(JSON.stringify(compiledSteps, null, 2));
+                alert("Compiled JSON logged to console.\n\n" + JSON.stringify(compiledSteps, null, 2));
+              }}
               className="bg-slate-800 hover:bg-slate-900 text-white px-4 py-2 rounded-md font-medium text-sm transition-colors shadow-sm flex items-center gap-2"
             >
               <FileJson size={16} /> Compile JSON
             </button>
             <button
-              className="bg-emerald-600 hover:bg-emerald-700 text-white px-5 py-2 rounded-md font-bold text-sm transition-colors shadow-md shadow-emerald-900/20 flex items-center gap-2"
-              disabled={!selectedWorkspace}
+              onClick={handleRun}
+              disabled={!selectedWorkspace || isExecuting}
+              className={`text-white px-5 py-2 rounded-md font-bold text-sm transition-colors shadow-md flex items-center gap-2 ${
+                 isExecuting ? "bg-emerald-800 opacity-70 cursor-not-allowed" : "bg-emerald-600 hover:bg-emerald-700 shadow-emerald-900/20"
+              }`}
             >
-              <Play size={16} /> Run Canvas
+              <Play size={16} /> {isExecuting ? "Executing..." : "▶ Run Workflow"}
             </button>
           </div>
         </header>
@@ -296,12 +344,15 @@ export default function AppShell() {
         {/* Workspace Content Area */}
         <div className="flex-1 relative w-full h-full">
           {activeTab === "editor" ? (
+            <>
              <ReactFlow
                 nodes={nodes}
                 edges={edges}
                 onNodesChange={onNodesChange}
                 onEdgesChange={onEdgesChange}
                 onConnect={onConnect}
+                onNodeClick={onNodeClick}
+                onPaneClick={onPaneClick}
                 nodeTypes={nodeTypes}
                 fitView
                 className="bg-slate-950"
@@ -309,6 +360,84 @@ export default function AppShell() {
                 <Background variant={BackgroundVariant.Dots} gap={16} size={1} color="#334155" />
                 <Controls className="bg-slate-800 text-white border-slate-700 fill-white" />
              </ReactFlow>
+
+             {/* Properties Panel */}
+             {selectedNodeId && (
+               <div className="absolute top-0 right-0 w-[300px] h-full bg-white border-l border-slate-200 shadow-xl z-20 flex flex-col">
+                 <div className="p-4 border-b border-slate-200 bg-slate-50 flex justify-between items-center">
+                   <h3 className="font-bold text-slate-800">Node Properties</h3>
+                   <button onClick={() => setSelectedNodeId(null)} className="text-slate-400 hover:text-slate-600">✕</button>
+                 </div>
+                 <div className="p-4 flex-1 overflow-y-auto">
+                   {nodes.filter(n => n.id === selectedNodeId).map(node => (
+                     <div key={node.id} className="space-y-4">
+                       <div>
+                         <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Node Type</label>
+                         <div className="px-3 py-1.5 bg-slate-100 rounded text-sm text-slate-700 font-medium capitalize">{node.type?.replace('_', ' ')}</div>
+                       </div>
+
+                       {node.type === 'gemini' && (
+                         <div>
+                           <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Prompt</label>
+                           <textarea
+                             className="w-full h-48 px-3 py-2 border border-slate-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                             value={node.data.prompt as string || ''}
+                             onChange={(e) => updateNodeData(node.id, { prompt: e.target.value })}
+                             placeholder="Enter AI prompt..."
+                           />
+                         </div>
+                       )}
+
+                       {node.type === 'scraper' && (
+                         <div>
+                           <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Target URL</label>
+                           <input
+                             type="text"
+                             className="w-full px-3 py-2 border border-slate-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-amber-500 focus:border-amber-500"
+                             value={node.data.url as string || ''}
+                             onChange={(e) => updateNodeData(node.id, { url: e.target.value })}
+                             placeholder="https://..."
+                           />
+                         </div>
+                       )}
+
+                       {node.type === 'agentic_loop' && (
+                         <>
+                           <div>
+                             <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Repository/Target URL</label>
+                             <input
+                               type="text"
+                               className="w-full px-3 py-2 border border-slate-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-purple-500"
+                               value={node.data.url as string || ''}
+                               onChange={(e) => updateNodeData(node.id, { url: e.target.value })}
+                               placeholder="https://github.com/..."
+                             />
+                           </div>
+                           <div>
+                             <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Max Iterations</label>
+                             <input
+                               type="number"
+                               min="1"
+                               max="10"
+                               className="w-full px-3 py-2 border border-slate-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-purple-500"
+                               value={node.data.max_iterations as number || 3}
+                               onChange={(e) => updateNodeData(node.id, { max_iterations: parseInt(e.target.value, 10) || 3 })}
+                             />
+                           </div>
+                         </>
+                       )}
+
+                       {node.type === 'trigger' && (
+                         <div className="text-sm text-slate-500 italic">
+                           Trigger nodes are the starting point of the execution graph. No configuration needed.
+                         </div>
+                       )}
+                     </div>
+                   ))}
+                 </div>
+               </div>
+             )}
+            </>
           ) : (
             <div className="h-full flex flex-col items-center justify-center p-8">
               <div className="w-full max-w-4xl bg-white rounded-xl shadow-sm border border-slate-200 p-8 text-center h-[500px] flex flex-col items-center justify-center">
