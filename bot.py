@@ -233,3 +233,179 @@ class GeminiBot:
         if self.playwright:
             await self.playwright.stop()
         logging.info("Browser closed.")
+
+
+class JulesBot:
+    """
+    A class to interact with the Jules developer interface via Playwright.
+    """
+    def __init__(self, profile_id="1"):
+        self.profile_id = profile_id
+        self.playwright = None
+        self.browser = None
+        self.context = None
+        self._initialized = False
+
+    async def initialize(self):
+        if self._initialized:
+            return
+
+        self.playwright = await async_playwright().start()
+
+        # User data directory for persistence, separate from Gemini's profile
+        user_data_dir = f"/tmp/jules_profile_{self.profile_id}"
+
+        self.context = await self.playwright.chromium.launch_persistent_context(
+            user_data_dir=user_data_dir,
+            headless=True,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-infobars",
+                "--window-size=1280,800"
+            ],
+            viewport={"width": 1280, "height": 800}
+        )
+
+        self._initialized = True
+        logging.info(f"JulesBot context initialized for profile {self.profile_id}")
+
+    async def create_new_page(self) -> Page:
+        if not self._initialized:
+            await self.initialize()
+        return await self.context.new_page()
+
+    async def send_task(self, page: Page, url: str, prompt: str, stream_queue=None, step_id=None):
+        """
+        Navigates to the target URL and submits the prompt to Jules.
+        """
+        import json
+        import asyncio
+        from playwright.async_api import expect, TimeoutError as PlaywrightTimeoutError
+
+        async def emit(msg):
+            if stream_queue and step_id:
+                await stream_queue.put(f"data: {json.dumps({'step': step_id, 'status': 'Jules Working', 'message': f'[TELEMETRY] {msg}', 'screen': 'right'})}\n\n")
+
+        try:
+            await emit(f"Navigating to Jules target URL: {url}...")
+            logging.info(f"Navigating to Jules target URL: {url}")
+
+            try:
+                await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                await emit("Page loaded successfully.")
+            except PlaywrightTimeoutError:
+                await emit("Network seems slow, checking status... Retrying navigation.")
+                await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+
+            await emit("Locating input field...")
+            input_box = page.locator("textarea").first
+
+            try:
+                await input_box.wait_for(state="visible", timeout=20000)
+            except PlaywrightTimeoutError:
+                await emit("Timeout waiting for element, retrying...")
+                await asyncio.sleep(2)
+                await input_box.wait_for(state="visible", timeout=20000)
+
+            await input_box.fill(prompt)
+            await emit("Prompt entered into Jules interface.")
+            logging.info("Entered prompt into Jules.")
+
+            # Submission Check
+            await emit("Pressing Enter to submit task...")
+            await page.keyboard.press("Enter")
+
+            # Verify submission by checking if input box clears or becomes disabled
+            try:
+                await expect(input_box).to_be_empty(timeout=5000)
+                await emit("Input box cleared, submission successful.")
+            except:
+                await emit("Input box didn't clear immediately, assuming submission via DOM change...")
+
+            await emit("Prompt submitted, waiting for generation...")
+            logging.info("Submitted prompt to Jules.")
+
+        except Exception as e:
+            if "Target closed" in str(e):
+                error_msg = "[FATAL] Browser crashed due to memory. Attempting recovery..."
+                await emit(error_msg)
+                logging.error(error_msg)
+                # Let the caller handle the restart
+                raise Exception("BROWSER_CRASH")
+            else:
+                error_msg = f"Error sending task to Jules: {e}"
+                await emit(f"[ERROR] {error_msg}")
+                logging.error(error_msg)
+                raise Exception(error_msg)
+
+    async def poll_for_completion(self, page: Page, stream_queue=None, step_id=None) -> str:
+        """
+        Polls the DOM dynamically for completion and extracts result.
+        """
+        import json
+        import asyncio
+        from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+
+        async def emit(msg):
+            if stream_queue and step_id:
+                await stream_queue.put(f"data: {json.dumps({'step': step_id, 'status': 'Jules Working', 'message': f'[TELEMETRY] {msg}', 'screen': 'right'})}\n\n")
+
+        logging.info("Waiting for Jules to finish...")
+        await emit("Waiting for Jules to finish generation...")
+
+        max_polls = 120 # 10 minutes total waiting
+        poll_count = 0
+
+        while poll_count < max_polls:
+            poll_count += 1
+
+            try:
+                # Dynamic wait for 5 seconds per tick instead of hard sleep
+                try:
+                    # Multi-Factor trigger: check for Ready for review
+                    await page.locator("text='Ready for review'").wait_for(state="visible", timeout=5000)
+
+                    await emit("Detected 'Ready for review' text.")
+                    logging.info("Jules reported 'Ready for review'.")
+
+                    # Verify network is idle to ensure no lingering requests (Multi-Factor)
+                    await emit("Waiting for network to become idle...")
+                    try:
+                        await page.wait_for_load_state("networkidle", timeout=10000)
+                    except PlaywrightTimeoutError:
+                        await emit("Network idle timeout, proceeding with DOM extraction anyway...")
+
+                    body_text = await page.inner_text("body")
+                    # Extract branch link using regex
+                    import re
+                    match = re.search(r'(https://github\.com/\S+/tree/\S+)', body_text)
+                    if match:
+                        link = match.group(1)
+                        await emit(f"Extracted branch link: {link}")
+                        return f"Jules finished. Branch link: {link}"
+                    return "Jules finished successfully. Status: Ready for review."
+                except PlaywrightTimeoutError:
+                    if poll_count % 6 == 0: # Every 30 seconds
+                        await emit(f"Still waiting for completion... (Tick {poll_count}/{max_polls})")
+                    continue
+
+            except Exception as e:
+                if "Target closed" in str(e):
+                    error_msg = "[FATAL] Browser crashed due to memory. Attempting recovery..."
+                    await emit(error_msg)
+                    logging.error(error_msg)
+                    raise Exception("BROWSER_CRASH")
+                else:
+                    logging.debug(f"Error during Jules polling check: {e}")
+
+        raise Exception("Timeout waiting for Jules to complete task.")
+
+    async def quit(self):
+        """Closes the browser."""
+        if self.context:
+            await self.context.close()
+        if self.playwright:
+            await self.playwright.stop()
+        logging.info("JulesBot Browser closed.")

@@ -1,9 +1,10 @@
 from fastapi import FastAPI, Request, BackgroundTasks, HTTPException
 from fastapi.templating import Jinja2Templates
 from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 import asyncio
 import logging
-from bot import GeminiBot
+from bot import GeminiBot, JulesBot
 import json
 import os
 from watchdog.observers import Observer
@@ -12,6 +13,15 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 scheduler = AsyncIOScheduler()
 
 import datetime
@@ -313,6 +323,7 @@ async def get_logs():
         return JSONResponse({"logs": f"Error reading logs: {str(e)}"})
 
 @app.get("/api/workspaces")
+@app.get("/api/epics")
 async def get_workspaces():
     epics = load_epics()
     # Return minimal info for sidebar
@@ -367,7 +378,11 @@ async def index(request: Request):
 
 import uuid
 
-async def run_workflow_engine(steps, workspace_id, stream_queue=None, profile_id="1"):
+async def run_workflow_engine(steps, workspace_id, stream_queue=None, profile_id="1", run_variables=None, global_state=None):
+    if run_variables is None:
+        run_variables = {}
+    if global_state is None:
+        global_state = {}
     run_id = str(uuid.uuid4())
     page = None
     try:
@@ -388,12 +403,21 @@ async def run_workflow_engine(steps, workspace_id, stream_queue=None, profile_id
                 if stream_queue: yield f"data: {json.dumps({'step': index + 1, 'status': 'Canceled', 'message': 'Workflow stopped by user.'})}\n\n"
                 break
 
-            step_id = index + 1
+            step_id = step.get('id', str(index + 1))
             prompt_template = step.get('prompt', '')
             new_chat = step.get('new_chat', False)
             step_type = step.get('type', 'standard')
             chat_url = step.get('chat_url', '').strip()
             show_result = step.get('show_result', True)
+            system_prompt = step.get('system_prompt', '').strip()
+
+            # Global Context State Injection (Blackboard)
+            for g_key, g_val in global_state.items():
+                g_tag = f"{{{{GLOBAL_{g_key}}}}}"
+                if g_tag in prompt_template:
+                    prompt_template = prompt_template.replace(g_tag, g_val)
+                if system_prompt and g_tag in system_prompt:
+                    system_prompt = system_prompt.replace(g_tag, g_val)
 
             # Global variable injection
             global_vars = load_globals()
@@ -401,6 +425,12 @@ async def run_workflow_engine(steps, workspace_id, stream_queue=None, profile_id
                 g_tag = f"{{{{GLOBAL_{g_key}}}}}"
                 if g_tag in prompt_template:
                     prompt_template = prompt_template.replace(g_tag, g_val)
+
+            # Runtime variable injection
+            for rv_key, rv_val in run_variables.items():
+                rv_tag = f"{{{{RUN_VAR_{rv_key}}}}}"
+                if rv_tag in prompt_template:
+                    prompt_template = prompt_template.replace(rv_tag, str(rv_val))
 
             logging.info(f"Executing Step {step_id} (Type: {step_type})")
             if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Starting', 'message': f'Executing Step {step_id}...'})}\n\n"
@@ -457,6 +487,122 @@ async def run_workflow_engine(steps, workspace_id, stream_queue=None, profile_id
                 # Batch Input Step
                 results[str(step_id)] = prompt_template
                 if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Complete', 'result': prompt_template, 'show_result': show_result})}\n\n"
+                index += 1
+                continue
+
+            elif step_type == 'agentic_loop':
+                # Meta-Agent Loop (Gemini <-> Jules)
+                jules_url = step.get('chat_url', '')
+                try:
+                    max_iterations = int(step.get('max_iterations', 3))
+                except ValueError:
+                    max_iterations = 3
+
+                loop_result = ""
+                current_gemini_prompt = prompt_template
+                if system_prompt:
+                    current_gemini_prompt = f"System Instructions / Persona:\n{system_prompt}\n\nTask:\n{current_gemini_prompt}"
+
+                if stream_queue: yield f"data: {{json.dumps({{'step': step_id, 'status': 'Agent Loop Started', 'message': 'Initializing Dual-Bot Engine...'}})}}\n\n"
+
+                jules_bot = JulesBot(profile_id=profile_id)
+                jules_page = None
+
+                # We need accumulated context to pass across reset boundaries
+                accumulated_context = "Task: " + current_gemini_prompt
+
+                try:
+                    reset_threshold = int(step.get('reset_threshold', 3))
+                except ValueError:
+                    reset_threshold = 3
+
+                try:
+                    stop_sequence = step.get('stop_sequence', 'FINAL_REVIEW_COMPLETE')
+                except Exception:
+                    stop_sequence = 'FINAL_REVIEW_COMPLETE'
+
+                for i in range(max_iterations):
+                    if cancel_event and cancel_event.is_set():
+                        break
+
+                    # --- Context Reset (Prevent DOM Bloat) ---
+                    if i > 0 and i % reset_threshold == 0:
+                        if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Agent Loop Checkpoint', 'message': '[TELEMETRY] Routine context reset to prevent DOM bloat. Initializing new chat context...', 'screen': 'left'})}\n\n"
+                        # We don't just reload the current page, we explicitly start a new chat
+                        # and pass the summarized context to re-ground Gemini without the 3-turn heavy DOM
+                        await current_bot.start_new_chat(page)
+                        current_gemini_prompt = f"We are continuing a task. Here is the context so far:\n{accumulated_context}\n\nResume the review and next steps."
+
+                    if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Gemini Working', 'message': f'Iteration {i+1}: Gemini generating coding prompt...', 'screen': 'left'})}\n\n"
+
+                    # 1. Prompt Gemini
+                    if new_chat and i == 0:
+                        await current_bot.start_new_chat(page)
+                    elif i == 0 and chat_url and chat_url.startswith("https://gemini.google.com"):
+                        await current_bot.goto_specific_chat(page, chat_url)
+
+                    await current_bot.send_prompt(page, current_gemini_prompt)
+
+                    # Poll for Gemini Output
+                    gemini_output_captured = {"text": ""}
+                    async def gemini_poll_cb(text):
+                        if text and text != gemini_output_captured["text"]:
+                            gemini_output_captured["text"] = text
+                            if stream_queue: await stream_queue.put(f"data: {json.dumps({'step': step_id, 'status': 'Gemini Output', 'message': text, 'screen': 'left'})}\n\n")
+
+                    await current_bot.wait_for_response(page, timeout=300000, poll_callback=gemini_poll_cb)
+                    gemini_response = await current_bot.get_last_response(page)
+
+                    accumulated_context += f"\n\nGemini: {gemini_response}"
+
+                    if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Gemini Output', 'message': gemini_response, 'screen': 'left'})}\n\n"
+
+                    # If Gemini outputs something indicating it's completely done, we break early
+                    if stop_sequence in gemini_response:
+                        loop_result = gemini_response
+                        break
+
+                    # 2. Prompt Jules
+                    if not jules_url:
+                        loop_result = f"Error: Jules/Repository URL not provided. Gemini generated: {gemini_response}"
+                        break
+
+                    if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Jules Working', 'message': f'Iteration {i+1}: Sent to Jules. Waiting for completion...', 'screen': 'right'})}\n\n"
+
+                    jules_response = ""
+                    try:
+                        # Attempt to use existing page to save overhead, if not create one
+                        if not jules_page or jules_page.is_closed():
+                            jules_page = await jules_bot.create_new_page()
+
+                        await jules_bot.send_task(jules_page, jules_url, gemini_response, stream_queue=stream_queue, step_id=step_id)
+
+                        jules_response = await jules_bot.poll_for_completion(jules_page, stream_queue=stream_queue, step_id=step_id)
+
+                        if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Jules Output', 'message': jules_response, 'screen': 'right'})}\n\n"
+                    except Exception as e:
+                        error_msg = str(e)
+                        if "BROWSER_CRASH" in error_msg:
+                            # Context Recovery Logic
+                            if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Jules Error', 'message': '[FATAL] Memory Crash. Hard-restarting JulesBot context...', 'screen': 'right'})}\n\n"
+                            await jules_bot.quit()
+                            # It will auto-initialize on next create_new_page in the next loop iteration
+                            jules_page = None
+                            jules_response = "Jules experienced a system crash and was rebooted. Please resend the instructions."
+                        else:
+                            jules_response = f"Jules Error: {error_msg}"
+                            if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Jules Error', 'message': jules_response, 'screen': 'right'})}\n\n"
+
+                    accumulated_context += f"\n\nJules: {jules_response}"
+
+                    # 3. Next iteration prompt
+                    current_gemini_prompt = f"Jules has finished with the following output/status: {jules_response}\n\nPlease review this. If everything is correct and no further coding is needed, reply with 'FINAL_REVIEW_COMPLETE'. Otherwise, provide the next set of coding instructions for Jules."
+                    loop_result = f"Latest Jules Output: {jules_response}\nLatest Gemini Review: {gemini_response}"
+
+                await jules_bot.quit()
+
+                results[str(step_id)] = loop_result
+                if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Complete', 'result': loop_result, 'show_result': show_result})}\n\n"
                 index += 1
                 continue
 
@@ -763,12 +909,19 @@ async def run_workflow_engine(steps, workspace_id, stream_queue=None, profile_id
                                 if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'New Chat', 'message': 'Starting new chat...'})}\n\n"
                                 await current_bot.start_new_chat(page)
 
-                            # Smart Context Injection: Replace {{OUTPUT_X}} with actual results
+                            # Smart Context Injection: Replace {{OUTPUT_X}} and {{NODE_ID}} with actual results
                             final_prompt = prompt_template
+                            if system_prompt:
+                                final_prompt = f"System Instructions / Persona:\n{system_prompt}\n\nUser Request:\n{final_prompt}"
+
                             for past_id, past_output in results.items():
                                 tag = f"{{{{OUTPUT_{past_id}}}}}"
                                 if tag in final_prompt:
                                     final_prompt = final_prompt.replace(tag, past_output)
+
+                                node_tag = f"{{{{{past_id}}}}}"
+                                if node_tag in final_prompt:
+                                    final_prompt = final_prompt.replace(node_tag, str(past_output))
 
                             if len(final_prompt) > CHUNK_LIMIT:
                                 is_chunked = True
@@ -954,44 +1107,22 @@ async def run_workflow_engine(steps, workspace_id, stream_queue=None, profile_id
             index += 1
 
 
-        # Save results to the workspace if provided
-        if workspace_id:
-            epics = load_epics()
-            if workspace_id in epics:
-                epics[workspace_id]["results"] = results
-                save_epics(epics)
-
-            # Save to Time Machine History
-            history_db = load_history()
-            if workspace_id not in history_db:
-                history_db[workspace_id] = []
-
-            timestamp = datetime.datetime.now().isoformat()
-            history_db[workspace_id].append({
-                "timestamp": timestamp,
-                "results": results
-            })
-
-            # Keep only last 10
-            if len(history_db[workspace_id]) > 10:
-                history_db[workspace_id] = history_db[workspace_id][-10:]
-            save_history(history_db)
-
-            # If webhook exists, we could export it here
-            webhook_url = epics.get(workspace_id, {}).get("webhook_url")
-            if webhook_url:
-                import httpx
-                try:
-                    # Execute in background so we don't block
-                    asyncio.create_task(httpx.AsyncClient().post(webhook_url, json=results, timeout=10))
-                except Exception as e:
-                    logging.error(f"Webhook execution failed: {e}")
-
-        if stream_queue: yield f"data: {json.dumps({'status': 'Workflow Finished', 'results': results, 'timestamp': timestamp if workspace_id else None})}\n\n"
+        # History and persistence is now handled by the Next.js database frontend.
+        # We operate purely statelessly here as an execution engine.
+        if stream_queue: yield f"data: {json.dumps({{'status': 'Workflow Finished', 'results': results, 'timestamp': str(datetime.datetime.now())}})}\n\n"
     finally:
         if page:
             await page.close()
 
+
+
+@app.get("/stop")
+async def stop_workflow():
+    if cancel_event:
+        cancel_event.set()
+        logging.warning("User initiated manual stop.")
+        return JSONResponse({"status": "stopping"})
+    return JSONResponse({"status": "no active workflow"})
 
 @app.post("/execute")
 async def execute_workflow(request: Request):
@@ -1010,6 +1141,8 @@ async def execute_workflow(request: Request):
     steps = data.get('steps', [])
     workspace_id = data.get('workspace_id')
     profile_id = data.get('profile_id', '1')
+    run_variables = data.get('run_variables', {})
+    global_state = data.get('global_state', {})
 
     if not steps:
         return StreamingResponse(error_stream("No steps provided in workflow."), media_type="text/event-stream")
@@ -1028,7 +1161,7 @@ async def execute_workflow(request: Request):
 
     async def sse_wrapper():
         try:
-            async for event in run_workflow_engine(steps, workspace_id, stream_queue, profile_id):
+            async for event in run_workflow_engine(steps, workspace_id, stream_queue, profile_id, run_variables, global_state):
                 yield event
         finally:
             bot_semaphore.release()
