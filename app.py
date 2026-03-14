@@ -1077,40 +1077,9 @@ async def run_workflow_engine(steps, workspace_id, stream_queue=None, profile_id
             index += 1
 
 
-        # Save results to the workspace if provided
-        if workspace_id:
-            epics = load_epics()
-            if workspace_id in epics:
-                epics[workspace_id]["results"] = results
-                save_epics(epics)
-
-            # Save to Time Machine History
-            history_db = load_history()
-            if workspace_id not in history_db:
-                history_db[workspace_id] = []
-
-            timestamp = datetime.datetime.now().isoformat()
-            history_db[workspace_id].append({
-                "timestamp": timestamp,
-                "results": results
-            })
-
-            # Keep only last 10
-            if len(history_db[workspace_id]) > 10:
-                history_db[workspace_id] = history_db[workspace_id][-10:]
-            save_history(history_db)
-
-            # If webhook exists, we could export it here
-            webhook_url = epics.get(workspace_id, {}).get("webhook_url")
-            if webhook_url:
-                import httpx
-                try:
-                    # Execute in background so we don't block
-                    asyncio.create_task(httpx.AsyncClient().post(webhook_url, json=results, timeout=10))
-                except Exception as e:
-                    logging.error(f"Webhook execution failed: {e}")
-
-        if stream_queue: yield f"data: {json.dumps({'status': 'Workflow Finished', 'results': results, 'timestamp': timestamp if workspace_id else None})}\n\n"
+        # History and persistence is now handled by the Next.js database frontend.
+        # We operate purely statelessly here as an execution engine.
+        if stream_queue: yield f"data: {json.dumps({{'status': 'Workflow Finished', 'results': results, 'timestamp': str(datetime.datetime.now())}})}\n\n"
     finally:
         if page:
             await page.close()

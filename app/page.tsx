@@ -167,12 +167,57 @@ export default function AppShell() {
   const [edges, setEdges] = useState<Edge[]>(initialEdges);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [isExecuting, setIsExecuting] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
   const [logs, setLogs] = useState<{status: string, message: string}[]>([]);
   const logsEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [logs]);
+
+  useEffect(() => {
+    if (selectedWorkspace) {
+      fetchWorkflowData(selectedWorkspace.id);
+    }
+  }, [selectedWorkspace]);
+
+  const fetchWorkflowData = async (workspaceId: string) => {
+    try {
+      const res = await fetch(`/api/workflows/${workspaceId}`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.nodes && data.nodes.length > 0) {
+            setNodes(data.nodes);
+            setEdges(data.edges || []);
+        } else {
+            setNodes(initialNodes);
+            setEdges(initialEdges);
+        }
+      }
+    } catch (e) {
+      console.error("Failed to load workflow data", e);
+    }
+  };
+
+  const handleSave = async () => {
+    if (!selectedWorkspace) return;
+    setIsSaving(true);
+    try {
+        const res = await fetch(`/api/workflows/${selectedWorkspace.id}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ nodes, edges })
+        });
+        if (res.ok) {
+            alert("Blueprint saved successfully!");
+        }
+    } catch (e) {
+        console.error("Failed to save workflow", e);
+        alert("Failed to save workflow");
+    } finally {
+        setIsSaving(false);
+    }
+  };
 
   const onNodeClick = useCallback((_: any, node: Node) => {
     setSelectedNodeId(node.id);
@@ -214,15 +259,13 @@ export default function AppShell() {
   const fetchWorkspaces = async () => {
     setIsLoading(true);
     try {
-      // Mocked for Next.js shell disconnected from backend for visual testing
-      // A real integration would fetch from actual FastAPI
-      const mockWorkspaces = [
-        { id: "1", name: "Content Pipeline", steps: [] },
-        { id: "2", name: "Agentic Researcher", steps: [] }
-      ];
-      setWorkspaces(mockWorkspaces);
-      if (mockWorkspaces.length > 0 && !selectedWorkspace) {
-        setSelectedWorkspace(mockWorkspaces[0]);
+      const res = await fetch("/api/workspaces");
+      if (res.ok) {
+        const data = await res.json();
+        setWorkspaces(data);
+        if (data.length > 0 && !selectedWorkspace) {
+          setSelectedWorkspace(data[0]);
+        }
       }
     } catch (error) {
       console.error("Error fetching workspaces:", error);
@@ -239,6 +282,26 @@ export default function AppShell() {
       data: { prompt: "New Step...", url: "https://..." }
     };
     setNodes((nds) => [...nds, newNode]);
+  };
+
+  const handleNewWorkspace = async () => {
+    const name = prompt("Enter a name for the new workspace:");
+    if (!name) return;
+
+    try {
+      const res = await fetch("/api/workspaces", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      if (res.ok) {
+        const newWs = await res.json();
+        fetchWorkspaces();
+        setSelectedWorkspace(newWs);
+      }
+    } catch (e) {
+      console.error("Error creating workspace", e);
+    }
   };
 
   const handleRun = async () => {
@@ -367,6 +430,14 @@ export default function AppShell() {
             ))
           )}
         </div>
+        <div className="p-4 border-t border-slate-800">
+          <button
+            onClick={handleNewWorkspace}
+            className="w-full flex items-center justify-center space-x-2 bg-slate-800 hover:bg-slate-700 text-white px-4 py-2 rounded-md transition-colors text-sm font-medium border border-slate-700"
+          >
+            <span>+ New Workspace</span>
+          </button>
+        </div>
       </aside>
 
       {/* Main Content */}
@@ -403,14 +474,11 @@ export default function AppShell() {
 
           <div className="flex items-center space-x-3">
             <button
-              onClick={() => {
-                const compiledSteps = compileNodesToSteps(nodes, edges);
-                console.log(JSON.stringify(compiledSteps, null, 2));
-                alert("Compiled JSON logged to console.\n\n" + JSON.stringify(compiledSteps, null, 2));
-              }}
-              className="bg-slate-800 hover:bg-slate-900 text-white px-4 py-2 rounded-md font-medium text-sm transition-colors shadow-sm flex items-center gap-2"
+              onClick={handleSave}
+              disabled={!selectedWorkspace || isSaving}
+              className="bg-slate-800 hover:bg-slate-900 text-white px-4 py-2 rounded-md font-medium text-sm transition-colors shadow-sm flex items-center gap-2 disabled:opacity-50"
             >
-              <FileJson size={16} /> Compile JSON
+              <FileJson size={16} /> {isSaving ? "Saving..." : "💾 Save Workflow"}
             </button>
             <button
               onClick={handleRun}
@@ -451,7 +519,7 @@ export default function AppShell() {
                 className="bg-slate-950"
              >
                 <Background variant={BackgroundVariant.Dots} gap={16} size={1} color="#334155" />
-                <Controls className="bg-slate-800 text-white border-slate-700 fill-white" />
+                <Controls className="bg-slate-800 border-slate-700 !fill-slate-800" />
              </ReactFlow>
 
              {/* Floating Execution Log Panel */}

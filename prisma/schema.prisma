@@ -12,6 +12,26 @@ model Workspace {
   name      String
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
-  steps     String   // JSON string of steps
-  results   String   // JSON string of results
+
+  workflows WorkflowBlueprint[]
+}
+
+model WorkflowBlueprint {
+  id          String   @id @default(cuid())
+  workspaceId String   @unique
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  nodes       String   // JSON string of React Flow nodes
+  edges       String   // JSON string of React Flow edges
+  updatedAt   DateTime @updatedAt
+
+  history     ExecutionHistory[]
+}
+
+model ExecutionHistory {
+  id           String   @id @default(cuid())
+  workflowId   String
+  workflow     WorkflowBlueprint @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+  status       String
+  logs         String   // JSON string
+  createdAt    DateTime @default(now())
 }
