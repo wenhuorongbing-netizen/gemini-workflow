@@ -16,15 +16,26 @@ from apscheduler.triggers.cron import CronTrigger
 
 app = FastAPI()
 
+
 @app.post("/api/accounts/login")
 async def login_account(profile_id: str):
     import bot
     try:
+        # Stop global bot if it's running on this profile to release lock
+        global bot_instance
+        if bot_instance is not None and getattr(bot_instance, 'profile_path', '') == f"chrome_profile_{profile_id}":
+            await bot_instance.quit()
+            bot_instance = None
+
         b = bot.GeminiBot(profile_path=f"chrome_profile_{profile_id}")
         await b.initialize(headless=False)
+        # We need to open gemini.google.com for login
+        page = await b.create_new_page()
+        await page.goto("https://gemini.google.com")
         return {"status": "success", "message": f"Browser opened for profile {profile_id}. Please log in manually and close the browser."}
     except Exception as e:
         return {"status": "error", "message": str(e)}
+
 
 @app.post("/api/upload")
 async def upload_file(file: UploadFile = File(...)):
@@ -551,7 +562,10 @@ async def run_workflow_engine(steps, workspace_id, stream_queue=None, profile_id
                 jules_page = None
 
                 # We need accumulated context to pass across reset boundaries
-                accumulated_context = "Task: " + current_gemini_prompt
+                # We need accumulated context to pass across reset boundaries
+                from datetime import datetime
+                accumulated_context = f"[{datetime.now().strftime('%H:%M:%S')}] Task: {current_gemini_prompt}"
+
 
                 try:
                     reset_threshold = int(step.get('reset_threshold', 3))

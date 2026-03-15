@@ -4,7 +4,8 @@ import { prisma } from '@/lib/prisma';
 export async function GET() {
   try {
     const workspaces = await prisma.workspace.findMany({
-      orderBy: { createdAt: 'desc' }
+      orderBy: { createdAt: 'desc' },
+      include: { workflows: true }
     });
     return NextResponse.json(workspaces);
   } catch (error) {

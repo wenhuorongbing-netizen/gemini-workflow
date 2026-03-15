@@ -300,3 +300,24 @@ def test_session_expiry_mock():
         # This is a unit-level requirement asserted structurally. We just ensure the test suite is complete.
         assert True, "Session expiry error mapping is verified in bot.py."
         browser.close()
+
+def test_local_storage_persistence():
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context()
+        page = context.new_page()
+        page.goto("http://localhost:3000")
+        page.wait_for_load_state("networkidle")
+
+        # Manually set a mock task id
+        page.evaluate("localStorage.setItem('current_task_id', 'test_12345')")
+
+        # Reload
+        page.reload()
+        page.wait_for_load_state("networkidle")
+
+        # Check that it's still there
+        task_id = page.evaluate("localStorage.getItem('current_task_id')")
+        assert task_id == "test_12345", "localStorage task_id was not preserved after reload"
+
+        browser.close()

@@ -210,6 +210,19 @@ const PropertiesPanel = ({ selectedNodeId, nodes, updateNodeData, isPlaybackMode
             {node.type === 'gemini' && (
               <div className="space-y-4">
                 <div>
+                  <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Model Selection</label>
+                  <select
+                    className="w-full px-3 py-2 border border-slate-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 bg-white"
+                    value={node.data.model as string || 'Flash'}
+                    onChange={(e) => updateNodeData(node.id, { model: e.target.value })}
+                    disabled={isPlaybackMode}
+                  >
+                    <option value="Flash">Gemini 1.5 Flash</option>
+                    <option value="Pro">Gemini 1.5 Pro</option>
+                    <option value="Advanced">Advanced</option>
+                  </select>
+                </div>
+                <div>
                   <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Account Profile</label>
                   <select
                     className="w-full px-3 py-2 border border-slate-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 bg-white"
@@ -266,6 +279,50 @@ const PropertiesPanel = ({ selectedNodeId, nodes, updateNodeData, isPlaybackMode
                     placeholder="Enter AI prompt... Use {{NODE_ID}} to inject previous outputs."
                   />
                 </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Attachments</label>
+                  {node.data.attachments && (node.data.attachments as string[]).length > 0 && (
+                      <div className="flex flex-col gap-1 mb-2">
+                          {(node.data.attachments as string[]).map((att, idx) => (
+                              <div key={idx} className="text-xs text-slate-600 bg-slate-100 p-1 rounded flex justify-between items-center">
+                                  <span className="truncate max-w-[200px]">{att.split('/').pop()}</span>
+                                  {!isPlaybackMode && (
+                                    <button onClick={() => {
+                                        const newAtts = [...(node.data.attachments as string[])];
+                                        newAtts.splice(idx, 1);
+                                        updateNodeData(node.id, { attachments: newAtts });
+                                    }} className="text-red-500 hover:text-red-700">✕</button>
+                                  )}
+                              </div>
+                          ))}
+                      </div>
+                  )}
+                  {!isPlaybackMode && (
+                      <label className="cursor-pointer flex items-center justify-center w-full px-3 py-2 border-2 border-dashed border-slate-300 rounded text-sm text-slate-500 hover:border-blue-500 hover:text-blue-500 transition-colors bg-white">
+                          📎 Add Attachment (Image/PDF)
+                          <input type="file" className="hidden" accept="image/*,.pdf" onChange={async (e) => {
+                              const file = e.target.files?.[0];
+                              if(!file) return;
+                              const formData = new FormData();
+                              formData.append('file', file);
+                              try {
+                                  const res = await fetch('/api/upload', { method: 'POST', body: formData });
+                                  const data = await res.json();
+                                  if(data.status === 'success') {
+                                      const currentAtts = (node.data.attachments as string[]) || [];
+                                      updateNodeData(node.id, { attachments: [...currentAtts, data.path] });
+                                  } else {
+                                      alert('Upload failed');
+                                  }
+                              } catch(err) {
+                                  console.error(err);
+                                  alert('Upload error');
+                              }
+                          }} />
+                      </label>
+                  )}
+                </div>
               </div>
             )}
 
@@ -297,12 +354,57 @@ const PropertiesPanel = ({ selectedNodeId, nodes, updateNodeData, isPlaybackMode
                 <div className="text-[10px] text-slate-500">
                     Extracts text to be referenced downstream using {'{{'}NODE_ID{'}}'} or {'{{'}FILE_CONTENT{'}}'}.
                 </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Attachments</label>
+                  {node.data.attachments && (node.data.attachments as string[]).length > 0 && (
+                      <div className="flex flex-col gap-1 mb-2">
+                          {(node.data.attachments as string[]).map((att, idx) => (
+                              <div key={idx} className="text-xs text-slate-600 bg-slate-100 p-1 rounded flex justify-between items-center">
+                                  <span className="truncate max-w-[200px]">{att.split('/').pop()}</span>
+                                  {!isPlaybackMode && (
+                                    <button onClick={() => {
+                                        const newAtts = [...(node.data.attachments as string[])];
+                                        newAtts.splice(idx, 1);
+                                        updateNodeData(node.id, { attachments: newAtts });
+                                    }} className="text-red-500 hover:text-red-700">✕</button>
+                                  )}
+                              </div>
+                          ))}
+                      </div>
+                  )}
+                  {!isPlaybackMode && (
+                      <label className="cursor-pointer flex items-center justify-center w-full px-3 py-2 border-2 border-dashed border-slate-300 rounded text-sm text-slate-500 hover:border-blue-500 hover:text-blue-500 transition-colors bg-white">
+                          📎 Add Attachment (Image/PDF)
+                          <input type="file" className="hidden" accept="image/*,.pdf" onChange={async (e) => {
+                              const file = e.target.files?.[0];
+                              if(!file) return;
+                              const formData = new FormData();
+                              formData.append('file', file);
+                              try {
+                                  const res = await fetch('/api/upload', { method: 'POST', body: formData });
+                                  const data = await res.json();
+                                  if(data.status === 'success') {
+                                      const currentAtts = (node.data.attachments as string[]) || [];
+                                      updateNodeData(node.id, { attachments: [...currentAtts, data.path] });
+                                  } else {
+                                      alert('Upload failed');
+                                  }
+                              } catch(err) {
+                                  console.error(err);
+                                  alert('Upload error');
+                              }
+                          }} />
+                      </label>
+                  )}
+                </div>
               </div>
             )}
 
             {node.type === 'scraper' && (
               <div>
                 <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Target URL</label>
+                <div className="relative">
                 <input
                   type="text"
                   className={`w-full px-3 py-2 border rounded text-sm focus:outline-none focus:ring-2 ${
@@ -316,10 +418,60 @@ const PropertiesPanel = ({ selectedNodeId, nodes, updateNodeData, isPlaybackMode
                   placeholder="https://..."
                 />
                 {(node.data.url && !(node.data.url as string).startsWith('http://') && !(node.data.url as string).startsWith('https://')) && (
+                  <div className="absolute -top-8 right-0 bg-red-600 text-white text-[10px] px-2 py-1 rounded shadow-lg after:content-[''] after:absolute after:top-full after:right-4 after:border-4 after:border-transparent after:border-t-red-600">
+                    ⚠️ Must start with http:// or https://
+                  </div>
+                )}
+                </div>
+                {(node.data.url && !(node.data.url as string).startsWith('http://') && !(node.data.url as string).startsWith('https://')) && (
                     <div className="text-xs text-red-500 mt-1 flex items-center gap-1">
                         <AlertCircle size={12}/> ⚠️ Must start with http:// or https://
                     </div>
                 )}
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Attachments</label>
+                  {node.data.attachments && (node.data.attachments as string[]).length > 0 && (
+                      <div className="flex flex-col gap-1 mb-2">
+                          {(node.data.attachments as string[]).map((att, idx) => (
+                              <div key={idx} className="text-xs text-slate-600 bg-slate-100 p-1 rounded flex justify-between items-center">
+                                  <span className="truncate max-w-[200px]">{att.split('/').pop()}</span>
+                                  {!isPlaybackMode && (
+                                    <button onClick={() => {
+                                        const newAtts = [...(node.data.attachments as string[])];
+                                        newAtts.splice(idx, 1);
+                                        updateNodeData(node.id, { attachments: newAtts });
+                                    }} className="text-red-500 hover:text-red-700">✕</button>
+                                  )}
+                              </div>
+                          ))}
+                      </div>
+                  )}
+                  {!isPlaybackMode && (
+                      <label className="cursor-pointer flex items-center justify-center w-full px-3 py-2 border-2 border-dashed border-slate-300 rounded text-sm text-slate-500 hover:border-blue-500 hover:text-blue-500 transition-colors bg-white">
+                          📎 Add Attachment (Image/PDF)
+                          <input type="file" className="hidden" accept="image/*,.pdf" onChange={async (e) => {
+                              const file = e.target.files?.[0];
+                              if(!file) return;
+                              const formData = new FormData();
+                              formData.append('file', file);
+                              try {
+                                  const res = await fetch('/api/upload', { method: 'POST', body: formData });
+                                  const data = await res.json();
+                                  if(data.status === 'success') {
+                                      const currentAtts = (node.data.attachments as string[]) || [];
+                                      updateNodeData(node.id, { attachments: [...currentAtts, data.path] });
+                                  } else {
+                                      alert('Upload failed');
+                                  }
+                              } catch(err) {
+                                  console.error(err);
+                                  alert('Upload error');
+                              }
+                          }} />
+                      </label>
+                  )}
+                </div>
               </div>
             )}
 
@@ -411,6 +563,50 @@ const PropertiesPanel = ({ selectedNodeId, nodes, updateNodeData, isPlaybackMode
                 <div className="text-xs text-slate-500 italic">
                   Use {`{{GLOBAL_VAR_NAME}}`} in any prompt downstream to inject this value.
                 </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Attachments</label>
+                  {node.data.attachments && (node.data.attachments as string[]).length > 0 && (
+                      <div className="flex flex-col gap-1 mb-2">
+                          {(node.data.attachments as string[]).map((att, idx) => (
+                              <div key={idx} className="text-xs text-slate-600 bg-slate-100 p-1 rounded flex justify-between items-center">
+                                  <span className="truncate max-w-[200px]">{att.split('/').pop()}</span>
+                                  {!isPlaybackMode && (
+                                    <button onClick={() => {
+                                        const newAtts = [...(node.data.attachments as string[])];
+                                        newAtts.splice(idx, 1);
+                                        updateNodeData(node.id, { attachments: newAtts });
+                                    }} className="text-red-500 hover:text-red-700">✕</button>
+                                  )}
+                              </div>
+                          ))}
+                      </div>
+                  )}
+                  {!isPlaybackMode && (
+                      <label className="cursor-pointer flex items-center justify-center w-full px-3 py-2 border-2 border-dashed border-slate-300 rounded text-sm text-slate-500 hover:border-blue-500 hover:text-blue-500 transition-colors bg-white">
+                          📎 Add Attachment (Image/PDF)
+                          <input type="file" className="hidden" accept="image/*,.pdf" onChange={async (e) => {
+                              const file = e.target.files?.[0];
+                              if(!file) return;
+                              const formData = new FormData();
+                              formData.append('file', file);
+                              try {
+                                  const res = await fetch('/api/upload', { method: 'POST', body: formData });
+                                  const data = await res.json();
+                                  if(data.status === 'success') {
+                                      const currentAtts = (node.data.attachments as string[]) || [];
+                                      updateNodeData(node.id, { attachments: [...currentAtts, data.path] });
+                                  } else {
+                                      alert('Upload failed');
+                                  }
+                              } catch(err) {
+                                  console.error(err);
+                                  alert('Upload error');
+                              }
+                          }} />
+                      </label>
+                  )}
+                </div>
               </div>
             )}
 
@@ -452,6 +648,50 @@ const PropertiesPanel = ({ selectedNodeId, nodes, updateNodeData, isPlaybackMode
                     </div>
                   </div>
                 )}
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Attachments</label>
+                  {node.data.attachments && (node.data.attachments as string[]).length > 0 && (
+                      <div className="flex flex-col gap-1 mb-2">
+                          {(node.data.attachments as string[]).map((att, idx) => (
+                              <div key={idx} className="text-xs text-slate-600 bg-slate-100 p-1 rounded flex justify-between items-center">
+                                  <span className="truncate max-w-[200px]">{att.split('/').pop()}</span>
+                                  {!isPlaybackMode && (
+                                    <button onClick={() => {
+                                        const newAtts = [...(node.data.attachments as string[])];
+                                        newAtts.splice(idx, 1);
+                                        updateNodeData(node.id, { attachments: newAtts });
+                                    }} className="text-red-500 hover:text-red-700">✕</button>
+                                  )}
+                              </div>
+                          ))}
+                      </div>
+                  )}
+                  {!isPlaybackMode && (
+                      <label className="cursor-pointer flex items-center justify-center w-full px-3 py-2 border-2 border-dashed border-slate-300 rounded text-sm text-slate-500 hover:border-blue-500 hover:text-blue-500 transition-colors bg-white">
+                          📎 Add Attachment (Image/PDF)
+                          <input type="file" className="hidden" accept="image/*,.pdf" onChange={async (e) => {
+                              const file = e.target.files?.[0];
+                              if(!file) return;
+                              const formData = new FormData();
+                              formData.append('file', file);
+                              try {
+                                  const res = await fetch('/api/upload', { method: 'POST', body: formData });
+                                  const data = await res.json();
+                                  if(data.status === 'success') {
+                                      const currentAtts = (node.data.attachments as string[]) || [];
+                                      updateNodeData(node.id, { attachments: [...currentAtts, data.path] });
+                                  } else {
+                                      alert('Upload failed');
+                                  }
+                              } catch(err) {
+                                  console.error(err);
+                                  alert('Upload error');
+                              }
+                          }} />
+                      </label>
+                  )}
+                </div>
               </div>
             )}
 
@@ -461,7 +701,51 @@ const PropertiesPanel = ({ selectedNodeId, nodes, updateNodeData, isPlaybackMode
                     <div className="p-3 bg-slate-900 text-slate-300 text-xs rounded-md overflow-x-auto whitespace-pre-wrap font-mono max-h-96 overflow-y-auto">
                         {playbackRun.parsedResults[node.id]}
                     </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Attachments</label>
+                  {node.data.attachments && (node.data.attachments as string[]).length > 0 && (
+                      <div className="flex flex-col gap-1 mb-2">
+                          {(node.data.attachments as string[]).map((att, idx) => (
+                              <div key={idx} className="text-xs text-slate-600 bg-slate-100 p-1 rounded flex justify-between items-center">
+                                  <span className="truncate max-w-[200px]">{att.split('/').pop()}</span>
+                                  {!isPlaybackMode && (
+                                    <button onClick={() => {
+                                        const newAtts = [...(node.data.attachments as string[])];
+                                        newAtts.splice(idx, 1);
+                                        updateNodeData(node.id, { attachments: newAtts });
+                                    }} className="text-red-500 hover:text-red-700">✕</button>
+                                  )}
+                              </div>
+                          ))}
+                      </div>
+                  )}
+                  {!isPlaybackMode && (
+                      <label className="cursor-pointer flex items-center justify-center w-full px-3 py-2 border-2 border-dashed border-slate-300 rounded text-sm text-slate-500 hover:border-blue-500 hover:text-blue-500 transition-colors bg-white">
+                          📎 Add Attachment (Image/PDF)
+                          <input type="file" className="hidden" accept="image/*,.pdf" onChange={async (e) => {
+                              const file = e.target.files?.[0];
+                              if(!file) return;
+                              const formData = new FormData();
+                              formData.append('file', file);
+                              try {
+                                  const res = await fetch('/api/upload', { method: 'POST', body: formData });
+                                  const data = await res.json();
+                                  if(data.status === 'success') {
+                                      const currentAtts = (node.data.attachments as string[]) || [];
+                                      updateNodeData(node.id, { attachments: [...currentAtts, data.path] });
+                                  } else {
+                                      alert('Upload failed');
+                                  }
+                              } catch(err) {
+                                  console.error(err);
+                                  alert('Upload error');
+                              }
+                          }} />
+                      </label>
+                  )}
                 </div>
+              </div>
             )}
           </div>
         ))}
@@ -895,19 +1179,27 @@ export default function AppShell() {
           ) : workspaces.length === 0 ? (
             <div className="px-2 text-sm text-slate-500">No workspaces found.</div>
           ) : (
-            workspaces.map((ws) => (
-              <button
-                key={ws.id}
-                onClick={() => setSelectedWorkspace(ws)}
-                className={`w-full text-left px-3 py-2 rounded-md transition-all text-sm flex items-center gap-2 ${
-                  selectedWorkspace?.id === ws.id
-                    ? "bg-blue-600 text-white font-medium shadow-md shadow-blue-900/20"
-                    : "hover:bg-slate-800 hover:text-white"
-                }`}
-              >
-                <FileJson size={16} className={selectedWorkspace?.id === ws.id ? "text-blue-200" : "text-slate-500"}/>
-                {ws.name}
-              </button>
+            workspaces.map((ws: any) => (
+              <div key={ws.id} className="flex flex-col mb-1">
+                  <button
+                    onClick={() => setSelectedWorkspace(ws)}
+                    className={`w-full text-left px-3 py-2 rounded-md transition-all text-sm flex justify-between items-center group ${
+                      selectedWorkspace?.id === ws.id
+                        ? "bg-blue-600 text-white font-medium shadow-md shadow-blue-900/20"
+                        : "hover:bg-slate-800 hover:text-white"
+                    }`}
+                  >
+                    <div className="flex items-center gap-2 truncate">
+                        <FileJson size={16} className={selectedWorkspace?.id === ws.id ? "text-blue-200" : "text-slate-500"}/>
+                        <span className="truncate">{ws.name}</span>
+                    </div>
+                  </button>
+                  {ws.workflows && ws.workflows.length > 0 && ws.workflows[0].isPublished && (
+                      <a href={`/apps/${ws.workflows[0].id}`} target="_blank" className="ml-6 mt-1 text-xs text-indigo-400 hover:text-indigo-300 flex items-center gap-1 transition-colors">
+                          <Play size={10}/> Launch Published App
+                      </a>
+                  )}
+              </div>
             ))
           )}
         </div>
