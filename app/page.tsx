@@ -876,6 +876,9 @@ export default function AppShell() {
             <Bot size={20} className="text-blue-500" />
             Gemini Builder
           </h1>
+          <button onClick={() => setShowAccountModal(true)} className="text-xs bg-slate-800 text-slate-300 px-2 py-1 rounded hover:bg-slate-700 transition">
+              👤 Accounts
+          </button>
         </div>
 
         <div className="flex-1 overflow-y-auto p-3 space-y-1">
@@ -1012,6 +1015,36 @@ export default function AppShell() {
             >
               <Play size={16} /> {isExecuting ? "Executing..." : "▶ Run Workflow"}
             </button>
+            <button
+              onClick={async () => {
+                  if (!selectedWorkspace || nodes.length === 0) { alert("Add nodes before publishing."); return; }
+
+                  // Extract inputs: URLs that are empty in Scraper, Prompts that are empty in Gemini
+                  const inputs = [];
+                  nodes.forEach(n => {
+                      if (n.type === 'scraper' && !n.data.url) { inputs.push({ id: n.id, type: 'url', label: 'Target URL' }); }
+                      if (n.type === 'gemini' && !n.data.prompt) { inputs.push({ id: n.id, type: 'prompt', label: 'AI Prompt' }); }
+                      if (n.type === 'agentic_loop' && !n.data.url) { inputs.push({ id: n.id, type: 'url', label: 'Target URL' }); }
+                  });
+
+                  try {
+                      const res = await fetch(`/api/workflows/${selectedWorkspace.workflows && selectedWorkspace.workflows.length > 0 ? selectedWorkspace.workflows[0].id : ''}/publish`, {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({ isPublished: true, publishedInputs: inputs })
+                      });
+                      if(res.ok) {
+                          alert("Published successfully!");
+                          fetchWorkspaces();
+                      } else {
+                          alert("Failed to publish.");
+                      }
+                  } catch(e) { console.error(e); }
+              }}
+              className="text-white px-5 py-2 rounded-md font-bold text-sm transition-colors shadow-md flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 shadow-indigo-900/20"
+            >
+              🚀 Publish App
+            </button>
           </div>
         </header>
 
@@ -1118,6 +1151,48 @@ export default function AppShell() {
             </>
         </div>
       </main>
+      {/* Account Modal */}
+      {showAccountModal && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+            <div className="bg-white rounded-xl shadow-2xl p-6 w-96 relative max-w-full">
+                <button onClick={() => setShowAccountModal(false)} className="absolute top-4 right-4 text-slate-400 hover:text-slate-600"><XCircle size={20}/></button>
+                <h3 className="text-lg font-bold mb-4 flex items-center gap-2"><Bot className="text-blue-500"/> Account Manager</h3>
+                <p className="text-sm text-slate-500 mb-4">Initialize a browser session for a specific profile. This opens a visible browser so you can log into Google Gemini.</p>
+                <div className="mb-4">
+                    <label className="block text-xs font-semibold text-slate-500 uppercase mb-1">Profile Name/ID</label>
+                    <input
+                        type="text"
+                        value={accountProfileStr}
+                        onChange={e => setAccountProfileStr(e.target.value)}
+                        className="w-full p-2 border rounded focus:ring-2 focus:ring-blue-500"
+                        placeholder="e.g. 1, work, personal"
+                    />
+                </div>
+                <button
+                    onClick={async () => {
+                        setIsLoggingIn(true);
+                        try {
+                            const res = await fetch(`http://127.0.0.1:8000/api/accounts/login?profile_id=${accountProfileStr}`, { method: 'POST' });
+                            const data = await res.json();
+                            if(data.status === 'success') {
+                                alert(data.message);
+                            } else {
+                                alert("Error: " + data.message);
+                            }
+                        } catch(e) {
+                            alert("Failed to reach backend.");
+                        }
+                        setIsLoggingIn(false);
+                    }}
+                    disabled={isLoggingIn}
+                    className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded transition flex justify-center items-center gap-2"
+                >
+                    {isLoggingIn ? <Loader2 size={16} className="animate-spin"/> : <Globe size={16}/>}
+                    Launch Headful Browser
+                </button>
+            </div>
+        </div>
+      )}
     </div>
   );
 }

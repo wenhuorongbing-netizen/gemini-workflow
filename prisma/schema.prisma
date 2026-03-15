@@ -17,14 +17,16 @@ model Workspace {
 }
 
 model WorkflowBlueprint {
-  id          String   @id @default(cuid())
-  workspaceId String   @unique
-  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  nodes       String   // JSON string of React Flow nodes
-  edges       String   // JSON string of React Flow edges
-  updatedAt   DateTime @updatedAt
+  id              String   @id @default(cuid())
+  workspaceId     String   @unique
+  workspace       Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  nodes           String   // JSON string of React Flow nodes
+  edges           String   // JSON string of React Flow edges
+  isPublished     Boolean  @default(false)
+  publishedInputs String?  // JSON string of inputs required from end user
+  updatedAt       DateTime @updatedAt
 
-  history     RunHistory[]
+  history         RunHistory[]
 }
 
 model RunHistory {

@@ -1,6 +1,35 @@
-from fastapi import FastAPI, Request, BackgroundTasks, HTTPException
+from fastapi import FastAPI, Request, BackgroundTasks, HTTPException, UploadFile, File
 from fastapi.templating import Jinja2Templates
 from fastapi.responses import StreamingResponse, JSONResponse
+import os
+import asyncio
+import logging
+from bot import GeminiBot, JulesBot
+import json
+import uuid
+import re
+
+@app.post("/api/accounts/login")
+async def login_account(profile_id: str):
+    import bot
+    try:
+        b = bot.GeminiBot(profile_path=f"chrome_profile_{profile_id}")
+        await b.initialize(headless=False)
+        return {"status": "success", "message": f"Browser opened for profile {profile_id}. Please log in manually and close the browser."}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+@app.post("/api/upload")
+async def upload_file(file: UploadFile = File(...)):
+    import shutil
+    try:
+        os.makedirs("/tmp/uploads", exist_ok=True)
+        file_path = f"/tmp/uploads/{file.filename}"
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+        return {"status": "success", "path": file_path}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 from fastapi.middleware.cors import CORSMiddleware
 import asyncio
 import logging
@@ -559,7 +588,9 @@ async def run_workflow_engine(steps, workspace_id, stream_queue=None, profile_id
                     elif i == 0 and chat_url and chat_url.startswith("https://gemini.google.com"):
                         await current_bot.goto_specific_chat(page, chat_url)
 
-                    await current_bot.send_prompt(page, current_gemini_prompt)
+                    attachments = step.get('attachments', [])
+                    model_type = step.get('model', 'Auto')
+                    await current_bot.send_prompt(page, current_gemini_prompt, attachments=attachments, model=model_type)
 
                     # Poll for Gemini Output
                     gemini_output_captured = {"text": ""}
@@ -856,7 +887,9 @@ async def run_workflow_engine(steps, workspace_id, stream_queue=None, profile_id
                                         # Avoid re module for simple string replacements unless necessary, string.replace is safer for arbitrary texts
                                         final_prompt = final_prompt.replace(tag, past_output)
 
-                                await current_bot.send_prompt(item_page, final_prompt)
+                                attachments = step.get('attachments', [])
+                                model_type = step.get('model', 'Auto')
+                                await current_bot.send_prompt(item_page, final_prompt, attachments=attachments, model=model_type)
 
                                 if cancel_event and cancel_event.is_set():
                                     return f"[Item {item_index + 1} CANCELED]"
@@ -963,7 +996,9 @@ async def run_workflow_engine(steps, workspace_id, stream_queue=None, profile_id
                             else:
                                 if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Sending', 'message': 'Sending prompt to Gemini...'})}\n\n"
                                 # Send the final compiled prompt to the bot
-                                await current_bot.send_prompt(page, final_prompt)
+                                attachments = step.get('attachments', [])
+                                model_type = step.get('model', 'Auto')
+                                await current_bot.send_prompt(page, final_prompt, attachments=attachments, model=model_type)
 
                             if cancel_event and cancel_event.is_set():
                                 raise asyncio.CancelledError("Workflow stopped by user.")
@@ -1067,7 +1102,7 @@ async def run_workflow_engine(steps, workspace_id, stream_queue=None, profile_id
                                         # To provide context to the bot, we prepend instructions to chunks
                                         chunk_wrapper = f"Please process this chunk of a larger document:\n\n{chunk_text}"
 
-                                        await current_bot.send_prompt(chunk_page, chunk_wrapper)
+                                        await current_bot.send_prompt(chunk_page, chunk_wrapper, attachments=step.get('attachments', []), model=step.get('model', 'Auto'))
 
                                         if cancel_event and cancel_event.is_set():
                                             return f"[Chunk {chunk_index + 1} CANCELED]"

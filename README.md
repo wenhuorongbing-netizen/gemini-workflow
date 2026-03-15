@@ -1,100 +1,98 @@
-<<<<<<< HEAD
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Gemini Automation Chain Builder & App Store
 
-## Getting Started
+The **Gemini Automation Chain Builder** is a powerful visual Multi-Agent workflow builder tailored explicitly for Google's Gemini models. It allows you to orchestrate web scrapers, data parsers, and nested conversational agents through a React Flow DAG (Directed Acyclic Graph) interface.
 
-First, run the development server:
+With **V22.0 (The AI App Store)**, you can now seamlessly publish your complex developer workflows as clean, Coze/ChatGPT-style minimalist applications for end-users to consume directly via Magic Forms!
 
+## ✨ Features
+- **Visual DAG Editor:** Drag-and-drop React Flow interface for designing Agentic Pipelines.
+- **Agentic Loops:** Implement self-correcting or iterative tasks between Gemini and standard browser scrapers.
+- **The AI App Store:** Publish developer blueprints as user-friendly apps with dynamic input forms.
+- **Multimodal Attachments:** Directly attach PDFs, Images, or CSVs to specific Gemini prompts.
+- **Account Profiles:** Manage independent browser persistence contexts (Work vs. Personal).
+- **Global Variables & State Management:** Easily pass {{NODE_ID}} references to downstream nodes.
+
+---
+
+## 🚀 Getting Started
+
+### Prerequisites
+- Node.js (v18+)
+- Python (v3.10+)
+- Google Chrome installed locally
+
+### 1. Environment Setup
+
+First, initialize the Python backend (FastAPI + Playwright):
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+playwright install chromium
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Next, initialize the Next.js frontend and Prisma database:
+```bash
+npm install
+npx prisma db push
+npx prisma generate
+```
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+### 2. Running the Servers
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Start the Python FastAPI Engine:
+```bash
+uvicorn app:app --host 0.0.0.0 --port 8000 &
+```
 
-## Learn More
+In a separate terminal, start the Next.js frontend:
+```bash
+npm run dev &
+```
 
-To learn more about Next.js, take a look at the following resources:
+Visit `http://localhost:3000` in your browser.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
-=======
-# Gemini Automation Chain Workflow Builder
-
-A lightning-fast, local-first, low-code automation tool for chaining complex prompts through Google Gemini. This tool uses a **FastAPI backend** and **Playwright (async)** to manage conversation flow efficiently, without freezing the main thread or causing HTTP timeouts.
-
-## Features
-
-*   **⚡ Playwright Integration:** Much faster and more robust than Selenium. Uses an asynchronous event loop so it doesn't block.
-*   **⚡ Real-Time Streaming (SSE):** The frontend receives live updates (e.g., "Typing prompt...", "Waiting for response...") as the bot operates, completely eliminating HTTP timeouts for long chains.
-*   **Dynamic Workflow Engine:** Create infinitely expandable step-by-step chains.
-*   **Smart Context Injection:** Use `{{OUTPUT_X}}` anywhere in your prompt to dynamically insert the exact response from step `X`.
-*   **Persistent Login:** Uses a dedicated Chromium profile so you only need to log in to Google once.
-*   **Prompt Library:** Save, edit, and quickly inject your favorite prompts directly from the sidebar.
-
-## Prerequisites
-
-*   Python 3.8+
-*   A Google account with access to [Gemini](https://gemini.google.com/).
-
-## Installation
-
-1.  Clone this repository.
-2.  Install dependencies and the Playwright browser binaries:
-    ```bash
-    pip install -r requirements.txt
-    playwright install chromium
-    ```
-
-## First Run (Crucial!)
-
-Because this tool relies on your personal Google account, **you must log in manually the very first time.**
-
-1.  Start the FastAPI server:
-    ```bash
-    python app.py
-    ```
-2.  Open your browser to `http://localhost:5000`.
-3.  Add a simple step (e.g., "Say hello") and click **Run Workflow**.
-4.  **Wait.** A new Chromium window controlled by Playwright will appear.
-5.  If it navigates to Gemini and asks you to log in, **do so manually in that automated window.**
-6.  Once logged in and you see the chat interface, the bot will attempt to run your step. If it times out while you were logging in, simply run the workflow again from the UI.
-7.  The login session is saved in the `chrome_profile` folder locally. Future runs will bypass the login screen.
-
-## How to use Smart Injection (`{{OUTPUT_X}}`)
-
-Instead of just blindly appending data to the end of a prompt, you can precisely control where previous context goes.
-
-**Step 1 Prompt:**
-`Summarize the plot of The Matrix in 3 sentences.`
-
-**Step 2 Prompt:**
-`Translate the following summary into Spanish:
 ---
-{{OUTPUT_1}}
+
+## 🔑 Authentication (Account Manager)
+The core engine relies on a headless Chromium browser instance interacting directly with Gemini's web interface (to avoid API costs and leverage advanced features).
+
+**To use the platform, you must first log in:**
+1. Open the **Gemini Builder** at `http://localhost:3000`.
+2. Click the `[ 👤 Accounts ]` button in the top-left sidebar.
+3. Enter a Profile ID (e.g., `1` or `work`) and click **Launch Headful Browser**.
+4. A Chromium window will appear. Manually log into your Google Account.
+5. Close the browser window. Your session cookies are now securely saved in `chrome_profile_{id}` for headless use!
+
 ---
-Make sure the tone is dramatic.`
 
-You can easily insert these tags using the `+ {{OUTPUT_X}}` buttons above every text area!
+## 🛠️ Building Workflows
 
-## Disclaimer
+### Node Types
+* **Trigger:** Initiates the workflow (Manual or Cron-based).
+* **Gemini AI:** Sends prompts to Gemini. Supports Model Selection (Flash vs. Pro) and File Attachments.
+* **Web Scraper:** Extracts text from any target URL to use in downstream analysis.
+* **Agent Loop:** Creates a bounded retry/iteration loop. Set `Max Iterations` to prevent runaways.
+* **Global State:** Stores variables (`{{PROJECT_GOAL}}`) accessible anywhere in the DAG.
 
-This project relies on web scraping. Google may update the UI or DOM structure of Gemini at any time, which could break the selectors in `bot.py`. If the bot fails to find the input box or extract text, check the console logs and update the Playwright locators accordingly.
->>>>>>> 9e6ed47f6424da66380ed67101365f254e297116
+### Variable Binding
+When writing prompts in the Gemini AI node, you can dynamically inject upstream data using tags. Click the `[ Insert Variable ]` dropdown or manually type `{{NODE_ID}}` (where NODE_ID is the specific ID of a previous step, e.g., `{{1719283719}}`).
+
+### Publishing to the App Store
+1. Build a functional workflow in your workspace.
+2. Leave required fields empty (e.g., an empty Target URL in a Web Scraper).
+3. Click `🚀 Publish App` in the top right.
+4. Go to the Dashboard (by deselecting your workspace). Your new application is now available as a clean "Magic Form" for anyone to use!
+
+---
+
+## ⚠️ Troubleshooting
+
+**Q: The execution terminal says "Missing X server or $DISPLAY"**
+* Playwright is attempting to launch a headful browser in a headless server environment (like Docker or WSL without X11). Ensure `HEADLESS_MODE=True` is set in your environment or via the UI settings when not actively logging in.
+
+**Q: "TargetClosedError" or "Memory Overload"**
+* You ran out of system RAM or Chromium crashed. The backend auto-recovers and resets the context, but you may need to reduce your `Max Iterations` in Agent Loops or increase your server memory.
+
+**Q: My attachments aren't uploading!**
+* The file upload logic relies on the Gemini DOM structure. If Google updates the UI, the Playwright selectors in `bot.py` (`button[aria-label*='Upload image']`) may need updating.
