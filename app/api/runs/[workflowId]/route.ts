@@ -4,6 +4,8 @@ import { prisma } from '@/lib/prisma';
 export async function GET(request: NextRequest, { params }: { params: Promise<{ workflowId: string }> }) {
   try {
     const { workflowId } = await params;
+    const userId = request.headers.get('x-user-id');
+    if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
     // Find the workflow blueprint ID since the param might be workspaceId depending on frontend mapping
     // We assume the frontend passes the `workspaceId` and we need to fetch its workflow runs
@@ -16,7 +18,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     }
 
     const runs = await prisma.runHistory.findMany({
-      where: { workflowId: workflow.id },
+      where: { workflowId: workflow.id, userId },
       orderBy: { createdAt: 'desc' }
     });
 
@@ -29,6 +31,9 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
 export async function POST(request: NextRequest, { params }: { params: Promise<{ workflowId: string }> }) {
   try {
     const { workflowId } = await params;
+    const userId = request.headers.get('x-user-id');
+    if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
     const { status, logs, results, nodes, edges } = await request.json();
 
     const workflow = await prisma.workflowBlueprint.findUnique({
@@ -42,6 +47,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     const run = await prisma.runHistory.create({
       data: {
         workflowId: workflow.id,
+        userId,
         status,
         logs: JSON.stringify(logs),
         results: JSON.stringify(results),

@@ -160,12 +160,21 @@ class GeminiBot:
                         file_input = page.locator("input[type='file']").first
                         await file_input.set_input_files(attachments)
                         logging.info(f"Uploaded attachments: {attachments}")
-                        # Crucial: Wait for the progress bar to finish (it usually disappears)
-                        await page.wait_for_timeout(2000) # give it a moment to appear
-                        progress_bar = page.locator("progress, [role='progressbar']")
-                        if await progress_bar.count() > 0:
-                            await progress_bar.first.wait_for(state='hidden', timeout=30000)
-                        await page.wait_for_timeout(1000) # buffer
+
+                        # Wait for Google Gemini's file attachment thumbnail chip to appear before proceeding
+                        # This prevents the 'race condition' of clicking send before the file finishes uploading
+                        file_chip = page.locator("file-attachment-chip, div[data-test-id='uploaded-file']").first
+                        try:
+                            # Wait for at least one thumbnail indicating a successful upload
+                            await page.wait_for_selector("file-attachment-chip, div[data-test-id='uploaded-file']", timeout=30000)
+                            logging.info("Attachment thumbnail appeared, upload complete.")
+                        except Exception as chip_e:
+                            logging.warning("File chip didn't appear conventionally, falling back to progress bar wait.")
+                            await page.wait_for_timeout(2000)
+                            progress_bar = page.locator("progress, [role='progressbar']")
+                            if await progress_bar.count() > 0:
+                                await progress_bar.first.wait_for(state='hidden', timeout=30000)
+                        await page.wait_for_timeout(1000) # Final safety buffer
                 except Exception as e:
                     logging.error(f"Failed to upload attachment: {e}")
 

@@ -112,6 +112,7 @@ const nodeTypes = {
   agentic_loop: AgentLoopNode,
   state: StateNode,
   file: FileNode,
+  webhook: WebhookNode,
 };
 
 const initialNodes: Node[] = [
@@ -210,6 +211,19 @@ const PropertiesPanel = ({ selectedNodeId, nodes, updateNodeData, isPlaybackMode
             {node.type === 'gemini' && (
               <div className="space-y-4">
                 <div>
+                  <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Model Selection</label>
+                  <select
+                    className="w-full px-3 py-2 border border-slate-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 bg-white"
+                    value={node.data.model as string || 'Flash'}
+                    onChange={(e) => updateNodeData(node.id, { model: e.target.value })}
+                    disabled={isPlaybackMode}
+                  >
+                    <option value="Flash">Gemini 1.5 Flash</option>
+                    <option value="Pro">Gemini 1.5 Pro</option>
+                    <option value="Advanced">Advanced</option>
+                  </select>
+                </div>
+                <div>
                   <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Account Profile</label>
                   <select
                     className="w-full px-3 py-2 border border-slate-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 bg-white"
@@ -266,6 +280,50 @@ const PropertiesPanel = ({ selectedNodeId, nodes, updateNodeData, isPlaybackMode
                     placeholder="Enter AI prompt... Use {{NODE_ID}} to inject previous outputs."
                   />
                 </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Attachments</label>
+                  {node.data.attachments && (node.data.attachments as string[]).length > 0 && (
+                      <div className="flex flex-col gap-1 mb-2">
+                          {(node.data.attachments as string[]).map((att, idx) => (
+                              <div key={idx} className="text-xs text-slate-600 bg-slate-100 p-1 rounded flex justify-between items-center">
+                                  <span className="truncate max-w-[200px]">{att.split('/').pop()}</span>
+                                  {!isPlaybackMode && (
+                                    <button onClick={() => {
+                                        const newAtts = [...(node.data.attachments as string[])];
+                                        newAtts.splice(idx, 1);
+                                        updateNodeData(node.id, { attachments: newAtts });
+                                    }} className="text-red-500 hover:text-red-700">✕</button>
+                                  )}
+                              </div>
+                          ))}
+                      </div>
+                  )}
+                  {!isPlaybackMode && (
+                      <label className="cursor-pointer flex items-center justify-center w-full px-3 py-2 border-2 border-dashed border-slate-300 rounded text-sm text-slate-500 hover:border-blue-500 hover:text-blue-500 transition-colors bg-white">
+                          📎 Add Attachment (Image/PDF)
+                          <input type="file" className="hidden" accept="image/*,.pdf" onChange={async (e) => {
+                              const file = e.target.files?.[0];
+                              if(!file) return;
+                              const formData = new FormData();
+                              formData.append('file', file);
+                              try {
+                                  const res = await fetch('/api/upload', { method: 'POST', body: formData });
+                                  const data = await res.json();
+                                  if(data.status === 'success') {
+                                      const currentAtts = (node.data.attachments as string[]) || [];
+                                      updateNodeData(node.id, { attachments: [...currentAtts, data.path] });
+                                  } else {
+                                      alert('Upload failed');
+                                  }
+                              } catch(err) {
+                                  console.error(err);
+                                  alert('Upload error');
+                              }
+                          }} />
+                      </label>
+                  )}
+                </div>
               </div>
             )}
 
@@ -297,12 +355,116 @@ const PropertiesPanel = ({ selectedNodeId, nodes, updateNodeData, isPlaybackMode
                 <div className="text-[10px] text-slate-500">
                     Extracts text to be referenced downstream using {'{{'}NODE_ID{'}}'} or {'{{'}FILE_CONTENT{'}}'}.
                 </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Attachments</label>
+                  {node.data.attachments && (node.data.attachments as string[]).length > 0 && (
+                      <div className="flex flex-col gap-1 mb-2">
+                          {(node.data.attachments as string[]).map((att, idx) => (
+                              <div key={idx} className="text-xs text-slate-600 bg-slate-100 p-1 rounded flex justify-between items-center">
+                                  <span className="truncate max-w-[200px]">{att.split('/').pop()}</span>
+                                  {!isPlaybackMode && (
+                                    <button onClick={() => {
+                                        const newAtts = [...(node.data.attachments as string[])];
+                                        newAtts.splice(idx, 1);
+                                        updateNodeData(node.id, { attachments: newAtts });
+                                    }} className="text-red-500 hover:text-red-700">✕</button>
+                                  )}
+                              </div>
+                          ))}
+                      </div>
+                  )}
+                  {!isPlaybackMode && (
+                      <label className="cursor-pointer flex items-center justify-center w-full px-3 py-2 border-2 border-dashed border-slate-300 rounded text-sm text-slate-500 hover:border-blue-500 hover:text-blue-500 transition-colors bg-white">
+                          📎 Add Attachment (Image/PDF)
+                          <input type="file" className="hidden" accept="image/*,.pdf" onChange={async (e) => {
+                              const file = e.target.files?.[0];
+                              if(!file) return;
+                              const formData = new FormData();
+                              formData.append('file', file);
+                              try {
+                                  const res = await fetch('/api/upload', { method: 'POST', body: formData });
+                                  const data = await res.json();
+                                  if(data.status === 'success') {
+                                      const currentAtts = (node.data.attachments as string[]) || [];
+                                      updateNodeData(node.id, { attachments: [...currentAtts, data.path] });
+                                  } else {
+                                      alert('Upload failed');
+                                  }
+                              } catch(err) {
+                                  console.error(err);
+                                  alert('Upload error');
+                              }
+                          }} />
+                      </label>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {node.type === 'webhook' && (
+              <div className="space-y-4">
+                <div className="relative">
+                <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Target URL</label>
+                <input
+                  type="text"
+                  className={`w-full px-3 py-2 border rounded text-sm focus:outline-none focus:ring-2 ${
+                    (node.data.url && !(node.data.url as string).startsWith('http://') && !(node.data.url as string).startsWith('https://'))
+                      ? 'border-red-500 focus:ring-red-500 bg-red-50 text-red-900'
+                      : 'border-slate-300 focus:ring-fuchsia-500 focus:border-fuchsia-500'
+                  }`}
+                  value={node.data.url as string || ''}
+                  onChange={(e) => updateNodeData(node.id, { url: e.target.value })}
+                  disabled={isPlaybackMode}
+                  placeholder="https://hooks.zapier.com/..."
+                />
+                {(node.data.url && !(node.data.url as string).startsWith('http://') && !(node.data.url as string).startsWith('https://')) && (
+                  <div className="absolute -top-8 right-0 bg-red-600 text-white text-[10px] px-2 py-1 rounded shadow-lg after:content-[''] after:absolute after:top-full after:right-4 after:border-4 after:border-transparent after:border-t-red-600">
+                    ⚠️ Must start with http:// or https://
+                  </div>
+                )}
+                </div>
+                <div>
+                  <div className="flex justify-between items-center mb-1">
+                    <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider">Payload Template (JSON)</label>
+
+                    <div className="relative group">
+                      <button className="text-xs bg-slate-200 hover:bg-fuchsia-100 text-fuchsia-700 px-2 py-0.5 rounded transition InsertVariableBtn">
+                        Insert Variable
+                      </button>
+                      <div className="absolute right-0 top-full mt-1 w-48 bg-white border border-slate-200 rounded-md shadow-xl opacity-0 group-hover:opacity-100 pointer-events-none group-hover:pointer-events-auto transition-opacity z-50 p-1 flex flex-col gap-1 max-h-48 overflow-y-auto">
+                        {nodes.filter((n: any) => n.id !== node.id).map((n: any) => (
+                          <button
+                            key={n.id}
+                            onClick={() => {
+                              const newVal = (node.data.prompt || '') + ` {{${n.id}}}`;
+                              updateNodeData(node.id, { prompt: newVal });
+                            }}
+                            className="text-left text-xs px-2 py-1.5 hover:bg-slate-100 rounded text-slate-700 truncate"
+                            disabled={isPlaybackMode}
+                          >
+                            <span className="font-semibold">{n.type}</span>: {String(n.data.prompt || n.data.url || 'Node')}
+                          </button>
+                        ))}
+                        {nodes.length <= 1 && <div className="text-xs text-slate-400 p-2 text-center">No other nodes</div>}
+                      </div>
+                    </div>
+                  </div>
+                  <textarea
+                    className="w-full h-32 px-3 py-2 border border-slate-300 rounded text-sm font-mono focus:outline-none focus:ring-2 focus:ring-fuchsia-500 focus:border-fuchsia-500"
+                    value={node.data.prompt as string || ''}
+                    onChange={(e) => updateNodeData(node.id, { prompt: e.target.value })}
+                    disabled={isPlaybackMode}
+                    placeholder='{"message": "{{NODE_1_ID}}"}'
+                  />
+                </div>
               </div>
             )}
 
             {node.type === 'scraper' && (
               <div>
                 <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Target URL</label>
+                <div className="relative">
                 <input
                   type="text"
                   className={`w-full px-3 py-2 border rounded text-sm focus:outline-none focus:ring-2 ${
@@ -316,10 +478,60 @@ const PropertiesPanel = ({ selectedNodeId, nodes, updateNodeData, isPlaybackMode
                   placeholder="https://..."
                 />
                 {(node.data.url && !(node.data.url as string).startsWith('http://') && !(node.data.url as string).startsWith('https://')) && (
+                  <div className="absolute -top-8 right-0 bg-red-600 text-white text-[10px] px-2 py-1 rounded shadow-lg after:content-[''] after:absolute after:top-full after:right-4 after:border-4 after:border-transparent after:border-t-red-600">
+                    ⚠️ Must start with http:// or https://
+                  </div>
+                )}
+                </div>
+                {(node.data.url && !(node.data.url as string).startsWith('http://') && !(node.data.url as string).startsWith('https://')) && (
                     <div className="text-xs text-red-500 mt-1 flex items-center gap-1">
                         <AlertCircle size={12}/> ⚠️ Must start with http:// or https://
                     </div>
                 )}
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Attachments</label>
+                  {node.data.attachments && (node.data.attachments as string[]).length > 0 && (
+                      <div className="flex flex-col gap-1 mb-2">
+                          {(node.data.attachments as string[]).map((att, idx) => (
+                              <div key={idx} className="text-xs text-slate-600 bg-slate-100 p-1 rounded flex justify-between items-center">
+                                  <span className="truncate max-w-[200px]">{att.split('/').pop()}</span>
+                                  {!isPlaybackMode && (
+                                    <button onClick={() => {
+                                        const newAtts = [...(node.data.attachments as string[])];
+                                        newAtts.splice(idx, 1);
+                                        updateNodeData(node.id, { attachments: newAtts });
+                                    }} className="text-red-500 hover:text-red-700">✕</button>
+                                  )}
+                              </div>
+                          ))}
+                      </div>
+                  )}
+                  {!isPlaybackMode && (
+                      <label className="cursor-pointer flex items-center justify-center w-full px-3 py-2 border-2 border-dashed border-slate-300 rounded text-sm text-slate-500 hover:border-blue-500 hover:text-blue-500 transition-colors bg-white">
+                          📎 Add Attachment (Image/PDF)
+                          <input type="file" className="hidden" accept="image/*,.pdf" onChange={async (e) => {
+                              const file = e.target.files?.[0];
+                              if(!file) return;
+                              const formData = new FormData();
+                              formData.append('file', file);
+                              try {
+                                  const res = await fetch('/api/upload', { method: 'POST', body: formData });
+                                  const data = await res.json();
+                                  if(data.status === 'success') {
+                                      const currentAtts = (node.data.attachments as string[]) || [];
+                                      updateNodeData(node.id, { attachments: [...currentAtts, data.path] });
+                                  } else {
+                                      alert('Upload failed');
+                                  }
+                              } catch(err) {
+                                  console.error(err);
+                                  alert('Upload error');
+                              }
+                          }} />
+                      </label>
+                  )}
+                </div>
               </div>
             )}
 
@@ -411,6 +623,50 @@ const PropertiesPanel = ({ selectedNodeId, nodes, updateNodeData, isPlaybackMode
                 <div className="text-xs text-slate-500 italic">
                   Use {`{{GLOBAL_VAR_NAME}}`} in any prompt downstream to inject this value.
                 </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Attachments</label>
+                  {node.data.attachments && (node.data.attachments as string[]).length > 0 && (
+                      <div className="flex flex-col gap-1 mb-2">
+                          {(node.data.attachments as string[]).map((att, idx) => (
+                              <div key={idx} className="text-xs text-slate-600 bg-slate-100 p-1 rounded flex justify-between items-center">
+                                  <span className="truncate max-w-[200px]">{att.split('/').pop()}</span>
+                                  {!isPlaybackMode && (
+                                    <button onClick={() => {
+                                        const newAtts = [...(node.data.attachments as string[])];
+                                        newAtts.splice(idx, 1);
+                                        updateNodeData(node.id, { attachments: newAtts });
+                                    }} className="text-red-500 hover:text-red-700">✕</button>
+                                  )}
+                              </div>
+                          ))}
+                      </div>
+                  )}
+                  {!isPlaybackMode && (
+                      <label className="cursor-pointer flex items-center justify-center w-full px-3 py-2 border-2 border-dashed border-slate-300 rounded text-sm text-slate-500 hover:border-blue-500 hover:text-blue-500 transition-colors bg-white">
+                          📎 Add Attachment (Image/PDF)
+                          <input type="file" className="hidden" accept="image/*,.pdf" onChange={async (e) => {
+                              const file = e.target.files?.[0];
+                              if(!file) return;
+                              const formData = new FormData();
+                              formData.append('file', file);
+                              try {
+                                  const res = await fetch('/api/upload', { method: 'POST', body: formData });
+                                  const data = await res.json();
+                                  if(data.status === 'success') {
+                                      const currentAtts = (node.data.attachments as string[]) || [];
+                                      updateNodeData(node.id, { attachments: [...currentAtts, data.path] });
+                                  } else {
+                                      alert('Upload failed');
+                                  }
+                              } catch(err) {
+                                  console.error(err);
+                                  alert('Upload error');
+                              }
+                          }} />
+                      </label>
+                  )}
+                </div>
               </div>
             )}
 
@@ -452,6 +708,50 @@ const PropertiesPanel = ({ selectedNodeId, nodes, updateNodeData, isPlaybackMode
                     </div>
                   </div>
                 )}
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Attachments</label>
+                  {node.data.attachments && (node.data.attachments as string[]).length > 0 && (
+                      <div className="flex flex-col gap-1 mb-2">
+                          {(node.data.attachments as string[]).map((att, idx) => (
+                              <div key={idx} className="text-xs text-slate-600 bg-slate-100 p-1 rounded flex justify-between items-center">
+                                  <span className="truncate max-w-[200px]">{att.split('/').pop()}</span>
+                                  {!isPlaybackMode && (
+                                    <button onClick={() => {
+                                        const newAtts = [...(node.data.attachments as string[])];
+                                        newAtts.splice(idx, 1);
+                                        updateNodeData(node.id, { attachments: newAtts });
+                                    }} className="text-red-500 hover:text-red-700">✕</button>
+                                  )}
+                              </div>
+                          ))}
+                      </div>
+                  )}
+                  {!isPlaybackMode && (
+                      <label className="cursor-pointer flex items-center justify-center w-full px-3 py-2 border-2 border-dashed border-slate-300 rounded text-sm text-slate-500 hover:border-blue-500 hover:text-blue-500 transition-colors bg-white">
+                          📎 Add Attachment (Image/PDF)
+                          <input type="file" className="hidden" accept="image/*,.pdf" onChange={async (e) => {
+                              const file = e.target.files?.[0];
+                              if(!file) return;
+                              const formData = new FormData();
+                              formData.append('file', file);
+                              try {
+                                  const res = await fetch('/api/upload', { method: 'POST', body: formData });
+                                  const data = await res.json();
+                                  if(data.status === 'success') {
+                                      const currentAtts = (node.data.attachments as string[]) || [];
+                                      updateNodeData(node.id, { attachments: [...currentAtts, data.path] });
+                                  } else {
+                                      alert('Upload failed');
+                                  }
+                              } catch(err) {
+                                  console.error(err);
+                                  alert('Upload error');
+                              }
+                          }} />
+                      </label>
+                  )}
+                </div>
               </div>
             )}
 
@@ -461,7 +761,51 @@ const PropertiesPanel = ({ selectedNodeId, nodes, updateNodeData, isPlaybackMode
                     <div className="p-3 bg-slate-900 text-slate-300 text-xs rounded-md overflow-x-auto whitespace-pre-wrap font-mono max-h-96 overflow-y-auto">
                         {playbackRun.parsedResults[node.id]}
                     </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Attachments</label>
+                  {node.data.attachments && (node.data.attachments as string[]).length > 0 && (
+                      <div className="flex flex-col gap-1 mb-2">
+                          {(node.data.attachments as string[]).map((att, idx) => (
+                              <div key={idx} className="text-xs text-slate-600 bg-slate-100 p-1 rounded flex justify-between items-center">
+                                  <span className="truncate max-w-[200px]">{att.split('/').pop()}</span>
+                                  {!isPlaybackMode && (
+                                    <button onClick={() => {
+                                        const newAtts = [...(node.data.attachments as string[])];
+                                        newAtts.splice(idx, 1);
+                                        updateNodeData(node.id, { attachments: newAtts });
+                                    }} className="text-red-500 hover:text-red-700">✕</button>
+                                  )}
+                              </div>
+                          ))}
+                      </div>
+                  )}
+                  {!isPlaybackMode && (
+                      <label className="cursor-pointer flex items-center justify-center w-full px-3 py-2 border-2 border-dashed border-slate-300 rounded text-sm text-slate-500 hover:border-blue-500 hover:text-blue-500 transition-colors bg-white">
+                          📎 Add Attachment (Image/PDF)
+                          <input type="file" className="hidden" accept="image/*,.pdf" onChange={async (e) => {
+                              const file = e.target.files?.[0];
+                              if(!file) return;
+                              const formData = new FormData();
+                              formData.append('file', file);
+                              try {
+                                  const res = await fetch('/api/upload', { method: 'POST', body: formData });
+                                  const data = await res.json();
+                                  if(data.status === 'success') {
+                                      const currentAtts = (node.data.attachments as string[]) || [];
+                                      updateNodeData(node.id, { attachments: [...currentAtts, data.path] });
+                                  } else {
+                                      alert('Upload failed');
+                                  }
+                              } catch(err) {
+                                  console.error(err);
+                                  alert('Upload error');
+                              }
+                          }} />
+                      </label>
+                  )}
                 </div>
+              </div>
             )}
           </div>
         ))}
@@ -491,6 +835,30 @@ export default function AppShell() {
   const [playbackRun, setPlaybackRun] = useState<any | null>(null);
   const isPlaybackMode = !!playbackRun;
 
+  const [showAccountModal, setShowAccountModal] = useState(false);
+  const [accountProfileStr, setAccountProfileStr] = useState("1");
+  const [isLoggingIn, setIsLoggingIn] = useState(false);
+  const [currentUserId, setCurrentUserId] = useState<string>("user1");
+  const [userStats, setUserStats] = useState<any>(null);
+
+  useEffect(() => {
+    const savedUserId = localStorage.getItem('current_userId');
+    if (savedUserId) setCurrentUserId(savedUserId);
+  }, []);
+
+  useEffect(() => {
+    localStorage.setItem('current_userId', currentUserId);
+    fetchWorkspaces();
+    fetchUserStats();
+  }, [currentUserId]);
+
+  const fetchUserStats = async () => {
+      try {
+          const res = await fetch('/api/user', { headers: { 'x-user-id': currentUserId } });
+          if (res.ok) setUserStats(await res.json());
+      } catch(e) {}
+  };
+
   useEffect(() => {
     logsEndRef.current?.scrollIntoView(false);
   }, [logs]);
@@ -507,9 +875,7 @@ export default function AppShell() {
     if (!selectedWorkspace || isLoading || isPlaybackMode) return;
 
     const timeoutId = setTimeout(() => {
-        fetch(`/api/workflows/save`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+        fetch(`/api/workflows/save`, { method: "POST", headers: { "Content-Type": "application/json", "x-user-id": currentUserId },
             body: JSON.stringify({ workspaceId: selectedWorkspace.id, nodes, edges })
         }).then(() => {
             setIsSyncing(true);
@@ -518,7 +884,7 @@ export default function AppShell() {
     }, 1000);
 
     return () => clearTimeout(timeoutId);
-  }, [nodes, edges, selectedWorkspace, isLoading]);
+  }, [nodes, edges, selectedWorkspace, isLoading, isPlaybackMode]);
 
   // Animated Edges Logic
   useEffect(() => {
@@ -537,9 +903,7 @@ export default function AppShell() {
   const saveWorkflowSilent = async () => {
     if (!selectedWorkspace) return;
     try {
-        await fetch(`/api/workflows/${selectedWorkspace.id}`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+        await fetch(`/api/workflows/${selectedWorkspace.id}`, { method: "POST", headers: { "Content-Type": "application/json", "x-user-id": currentUserId },
             body: JSON.stringify({ nodes, edges })
         });
     } catch (e) {
@@ -549,7 +913,7 @@ export default function AppShell() {
 
   const fetchWorkflowData = async (workspaceId: string) => {
     try {
-      const res = await fetch(`/api/workflows/${workspaceId}`);
+      const res = await fetch(`/api/workflows/${workspaceId}`, { headers: { "x-user-id": currentUserId } });
       if (res.ok) {
         const data = await res.json();
         if (data.nodes && data.nodes.length > 0) {
@@ -561,7 +925,7 @@ export default function AppShell() {
         }
       }
 
-      const runRes = await fetch(`/api/runs/${workspaceId}`);
+      const runRes = await fetch(`/api/runs/${workspaceId}`, { headers: { "x-user-id": currentUserId } });
       if (runRes.ok) {
           setRunHistory(await runRes.json());
       }
@@ -574,9 +938,7 @@ export default function AppShell() {
     if (!selectedWorkspace) return;
     setIsSaving(true);
     try {
-        const res = await fetch(`/api/workflows/${selectedWorkspace.id}`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+        const res = await fetch(`/api/workflows/${selectedWorkspace.id}`, { method: "POST", headers: { "Content-Type": "application/json", "x-user-id": currentUserId },
             body: JSON.stringify({ nodes, edges })
         });
         if (res.ok) {
@@ -632,7 +994,7 @@ export default function AppShell() {
     if (savedTaskId) {
       console.log("Resuming task:", savedTaskId);
       setIsExecuting(true);
-      const eventSource = new EventSource(`http://127.0.0.1:8000/api/logs/${savedTaskId}`);
+      const eventSource = new EventSource(`http://127.0.0.1:5000/api/logs/${savedTaskId}`);
 
         eventSource.onmessage = async (event) => {
             try {
@@ -661,6 +1023,7 @@ export default function AppShell() {
                     setIsExecuting(false);
                     localStorage.removeItem('current_task_id');
                     eventSource.close();
+                    fetchUserStats();
                 }
             } catch (e) {
                 console.error("Error parsing JSON:", e, event.data);
@@ -678,7 +1041,7 @@ export default function AppShell() {
   const fetchWorkspaces = async () => {
     setIsLoading(true);
     try {
-      const res = await fetch("/api/workspaces");
+      const res = await fetch("/api/workspaces", { headers: { "x-user-id": currentUserId } });
       if (res.ok) {
         const data = await res.json();
         setWorkspaces(data);
@@ -708,11 +1071,7 @@ export default function AppShell() {
     if (!name) return;
 
     try {
-      const res = await fetch("/api/workspaces", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name }),
-      });
+      const res = await fetch("/api/workspaces", { method: "POST", headers: { "Content-Type": "application/json", "x-user-id": currentUserId }, body: JSON.stringify({ name }) });
       if (res.ok) {
         const newWs = await res.json();
         fetchWorkspaces();
@@ -755,10 +1114,10 @@ export default function AppShell() {
       });
 
       try {
-        const response = await fetch("http://127.0.0.1:8000/execute", {
+        const response = await fetch("http://127.0.0.1:5000/execute", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ steps: compiledSteps, workspace_id: selectedWorkspace?.id || "temp", profile_id: "1", global_state })
+          body: JSON.stringify({ steps: compiledSteps, workspace_id: selectedWorkspace?.id || "temp", profile_id: "1", global_state, user_id: currentUserId })
         });
 
         if (!response.ok) {
@@ -776,7 +1135,7 @@ export default function AppShell() {
         }
 
         localStorage.setItem('current_task_id', taskId);
-        const eventSource = new EventSource(`http://127.0.0.1:8000/api/logs/${taskId}`);
+        const eventSource = new EventSource(`http://127.0.0.1:5000/api/logs/${taskId}`);
 
         eventSource.onmessage = async (event) => {
             try {
@@ -876,9 +1235,16 @@ export default function AppShell() {
             <Bot size={20} className="text-blue-500" />
             Gemini Builder
           </h1>
-          <button onClick={() => setShowAccountModal(true)} className="text-xs bg-slate-800 text-slate-300 px-2 py-1 rounded hover:bg-slate-700 transition">
-              👤 Accounts
-          </button>
+          <div className="flex flex-col gap-1 items-end">
+            {selectedWorkspace && selectedWorkspace.quota !== undefined && (
+                <span className="text-[10px] bg-amber-500/20 text-amber-400 px-2 py-0.5 rounded-full border border-amber-500/30 font-bold whitespace-nowrap">
+                    ⚡ Tokens left: {selectedWorkspace.quota}
+                </span>
+            )}
+            <button onClick={() => setShowAccountModal(true)} className="text-[10px] bg-slate-800 text-slate-300 px-2 py-1 rounded hover:bg-slate-700 transition">
+                👤 Accounts
+            </button>
+          </div>
         </div>
 
         <div className="flex-1 overflow-y-auto p-3 space-y-1">
@@ -891,19 +1257,27 @@ export default function AppShell() {
           ) : workspaces.length === 0 ? (
             <div className="px-2 text-sm text-slate-500">No workspaces found.</div>
           ) : (
-            workspaces.map((ws) => (
-              <button
-                key={ws.id}
-                onClick={() => setSelectedWorkspace(ws)}
-                className={`w-full text-left px-3 py-2 rounded-md transition-all text-sm flex items-center gap-2 ${
-                  selectedWorkspace?.id === ws.id
-                    ? "bg-blue-600 text-white font-medium shadow-md shadow-blue-900/20"
-                    : "hover:bg-slate-800 hover:text-white"
-                }`}
-              >
-                <FileJson size={16} className={selectedWorkspace?.id === ws.id ? "text-blue-200" : "text-slate-500"}/>
-                {ws.name}
-              </button>
+            workspaces.map((ws: any) => (
+              <div key={ws.id} className="flex flex-col mb-1">
+                  <button
+                    onClick={() => setSelectedWorkspace(ws)}
+                    className={`w-full text-left px-3 py-2 rounded-md transition-all text-sm flex justify-between items-center group ${
+                      selectedWorkspace?.id === ws.id
+                        ? "bg-blue-600 text-white font-medium shadow-md shadow-blue-900/20"
+                        : "hover:bg-slate-800 hover:text-white"
+                    }`}
+                  >
+                    <div className="flex items-center gap-2 truncate">
+                        <FileJson size={16} className={selectedWorkspace?.id === ws.id ? "text-blue-200" : "text-slate-500"}/>
+                        <span className="truncate">{ws.name}</span>
+                    </div>
+                  </button>
+                  {ws.workflows && ws.workflows.length > 0 && ws.workflows[0].isPublished && (
+                      <a href={`/apps/${ws.workflows[0].id}`} target="_blank" className="ml-6 mt-1 text-xs text-indigo-400 hover:text-indigo-300 flex items-center gap-1 transition-colors">
+                          <Play size={10}/> Launch Published App
+                      </a>
+                  )}
+              </div>
             ))
           )}
         </div>
@@ -979,9 +1353,37 @@ export default function AppShell() {
               {selectedWorkspace ? selectedWorkspace.name : "Select a Workspace"}
             </h2>
 
+            {/* User Switcher Dropdown */}
+            <select
+                value={currentUserId}
+                onChange={e => setCurrentUserId(e.target.value)}
+                className="ml-4 text-xs border-slate-300 rounded px-2 py-1 bg-slate-100 text-slate-600 focus:ring-blue-500 font-medium"
+            >
+                <option value="user1">User 1 (Free)</option>
+                <option value="user2">User 2 (Team)</option>
+                <option value="user3">User 3 (Enterprise)</option>
+            </select>
           </div>
 
-          <div className="flex items-center space-x-3">
+          <div className="flex items-center space-x-4">
+            {/* Token Analytics Widget */}
+            {userStats && (
+                <div className="hidden md:flex flex-col items-end mr-6 pr-6 border-r border-slate-200">
+                    <div className="text-xs font-bold text-slate-500 mb-1 flex items-center gap-1">
+                        <Zap size={12} className={userStats.tokens_balance > 0 ? "text-amber-500" : "text-slate-400"}/>
+                        {userStats.tokens_balance} Tokens Left
+                    </div>
+                    <div className="w-32 h-1.5 bg-slate-200 rounded-full overflow-hidden flex">
+                        <div
+                            className={`h-full ${userStats.tokens_balance > 100 ? 'bg-indigo-500' : userStats.tokens_balance > 0 ? 'bg-amber-500' : 'bg-red-500'}`}
+                            style={{ width: `${Math.min((userStats.tokens_balance / 500) * 100, 100)}%` }}
+                        ></div>
+                    </div>
+                    <div className="text-[10px] text-slate-400 mt-1">{userStats.totalRunsThisMonth} automated runs this month</div>
+                    <a href="/pricing" className="text-[10px] text-blue-600 font-bold mt-0.5 hover:underline">Upgrade Plan →</a>
+                </div>
+            )}
+
             <div className="flex items-center gap-2 mr-2">
                 {isSyncing ? (
                     <div className="flex items-center gap-1 text-emerald-600 text-xs font-bold animate-pulse">
@@ -1020,17 +1422,16 @@ export default function AppShell() {
                   if (!selectedWorkspace || nodes.length === 0) { alert("Add nodes before publishing."); return; }
 
                   // Extract inputs: URLs that are empty in Scraper, Prompts that are empty in Gemini
-                  const inputs = [];
+                  const inputs: any[] = [];
                   nodes.forEach(n => {
                       if (n.type === 'scraper' && !n.data.url) { inputs.push({ id: n.id, type: 'url', label: 'Target URL' }); }
                       if (n.type === 'gemini' && !n.data.prompt) { inputs.push({ id: n.id, type: 'prompt', label: 'AI Prompt' }); }
                       if (n.type === 'agentic_loop' && !n.data.url) { inputs.push({ id: n.id, type: 'url', label: 'Target URL' }); }
+                      if (n.type === 'webhook' && !n.data.url) { inputs.push({ id: n.id, type: 'url', label: 'Webhook URL' }); }
                   });
 
                   try {
-                      const res = await fetch(`/api/workflows/${selectedWorkspace.workflows && selectedWorkspace.workflows.length > 0 ? selectedWorkspace.workflows[0].id : ''}/publish`, {
-                          method: 'POST',
-                          headers: { 'Content-Type': 'application/json' },
+                      const res = await fetch(`/api/workflows/${(selectedWorkspace as any).workflows && (selectedWorkspace as any).workflows.length > 0 ? (selectedWorkspace as any).workflows[0].id : \'\'}/publish`, { method: "POST", headers: { "Content-Type": "application/json", "x-user-id": currentUserId },
                           body: JSON.stringify({ isPublished: true, publishedInputs: inputs })
                       });
                       if(res.ok) {
@@ -1054,6 +1455,7 @@ export default function AppShell() {
                 <span className="text-sm font-bold text-slate-500 mr-2 uppercase tracking-wide">Nodes:</span>
                 <button onClick={() => addNode('gemini')} className="px-3 py-1.5 bg-white border border-slate-300 rounded text-sm font-medium hover:bg-blue-50 text-blue-700 transition flex items-center gap-1"><Bot size={14}/> Gemini AI</button>
                 <button onClick={() => addNode('scraper')} className="px-3 py-1.5 bg-white border border-slate-300 rounded text-sm font-medium hover:bg-amber-50 text-amber-700 transition flex items-center gap-1"><Globe size={14}/> Web Scraper</button>
+                <button onClick={() => addNode('webhook')} className="px-3 py-1.5 bg-white border border-slate-300 rounded text-sm font-medium hover:bg-fuchsia-50 text-fuchsia-700 transition flex items-center gap-1"><Globe size={14}/> Webhook</button>
                 <button onClick={() => addNode('file')} className="px-3 py-1.5 bg-white border border-slate-300 rounded text-sm font-medium hover:bg-emerald-50 text-emerald-700 transition flex items-center gap-1"><Database size={14}/> Upload File</button>
                 <button onClick={() => addNode('agentic_loop')} className="px-3 py-1.5 bg-white border border-slate-300 rounded text-sm font-medium hover:bg-purple-50 text-purple-700 transition flex items-center gap-1"><Repeat size={14}/> Agent Loop</button>
                 <button onClick={() => addNode('state')} className="px-3 py-1.5 bg-white border border-slate-300 rounded text-sm font-medium hover:bg-slate-200 text-slate-700 transition flex items-center gap-1"><Database size={14}/> Global State</button>
@@ -1107,9 +1509,9 @@ export default function AppShell() {
                                         try {
                                             const taskId = localStorage.getItem('current_task_id');
                                             if (taskId) {
-                                                await fetch(`http://127.0.0.1:8000/stop_task/${taskId}`, { method: 'POST' });
+                                                await fetch(`http://127.0.0.1:5000/stop_task/${taskId}`, { method: 'POST' });
                                             } else {
-                                                await fetch("http://127.0.0.1:8000/stop");
+                                                await fetch("http://127.0.0.1:5000/stop");
                                             }
                                             setIsExecuting(false);
                                         } catch (e) {}
@@ -1172,7 +1574,7 @@ export default function AppShell() {
                     onClick={async () => {
                         setIsLoggingIn(true);
                         try {
-                            const res = await fetch(`http://127.0.0.1:8000/api/accounts/login?profile_id=${accountProfileStr}`, { method: 'POST' });
+                            const res = await fetch(`/api/accounts/login?profile_id=${accountProfileStr}`, { method: 'POST' });
                             const data = await res.json();
                             if(data.status === 'success') {
                                 alert(data.message);

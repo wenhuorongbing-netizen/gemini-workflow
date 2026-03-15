@@ -1,6 +1,7 @@
 from fastapi import FastAPI, Request, BackgroundTasks, HTTPException, UploadFile, File
 from fastapi.templating import Jinja2Templates
 from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 import os
 import asyncio
 import logging
@@ -8,16 +9,33 @@ from bot import GeminiBot, JulesBot
 import json
 import uuid
 import re
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
+
+app = FastAPI()
+
 
 @app.post("/api/accounts/login")
 async def login_account(profile_id: str):
     import bot
     try:
+        # Stop global bot if it's running on this profile to release lock
+        global bot_instance
+        if bot_instance is not None and getattr(bot_instance, 'profile_path', '') == f"chrome_profile_{profile_id}":
+            await bot_instance.quit()
+            bot_instance = None
+
         b = bot.GeminiBot(profile_path=f"chrome_profile_{profile_id}")
         await b.initialize(headless=False)
+        # We need to open gemini.google.com for login
+        page = await b.create_new_page()
+        await page.goto("https://gemini.google.com")
         return {"status": "success", "message": f"Browser opened for profile {profile_id}. Please log in manually and close the browser."}
     except Exception as e:
         return {"status": "error", "message": str(e)}
+
 
 @app.post("/api/upload")
 async def upload_file(file: UploadFile = File(...)):
@@ -30,18 +48,6 @@ async def upload_file(file: UploadFile = File(...)):
         return {"status": "success", "path": file_path}
     except Exception as e:
         return {"status": "error", "message": str(e)}
-from fastapi.middleware.cors import CORSMiddleware
-import asyncio
-import logging
-from bot import GeminiBot, JulesBot
-import json
-import os
-from watchdog.observers import Observer
-from watchdog.events import FileSystemEventHandler
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.cron import CronTrigger
-
-app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
@@ -556,7 +562,10 @@ async def run_workflow_engine(steps, workspace_id, stream_queue=None, profile_id
                 jules_page = None
 
                 # We need accumulated context to pass across reset boundaries
-                accumulated_context = "Task: " + current_gemini_prompt
+                # We need accumulated context to pass across reset boundaries
+                from datetime import datetime
+                accumulated_context = f"[{datetime.now().strftime('%H:%M:%S')}] Task: {current_gemini_prompt}"
+
 
                 try:
                     reset_threshold = int(step.get('reset_threshold', 3))
@@ -654,7 +663,10 @@ async def run_workflow_engine(steps, workspace_id, stream_queue=None, profile_id
                     accumulated_context += f"\n\nJules: {jules_response}"
 
                     # 3. Next iteration prompt
-                    current_gemini_prompt = f"Jules has finished with the following output/status: {jules_response}\n\nPlease review this. If everything is correct and no further coding is needed, reply with 'FINAL_REVIEW_COMPLETE'. Otherwise, provide the next set of coding instructions for Jules."
+                    if "system crash and was rebooted" in jules_response:
+                        pass # current_gemini_prompt is already set to the recovery prompt
+                    else:
+                        current_gemini_prompt = f"Jules has finished with the following output/status: {jules_response}\n\nPlease review this. If everything is correct and no further coding is needed, reply with 'FINAL_REVIEW_COMPLETE'. Otherwise, provide the next set of coding instructions for Jules."
                     loop_result = f"Latest Jules Output: {jules_response}\nLatest Gemini Review: {gemini_response}"
 
                 await jules_bot.quit()
@@ -1254,6 +1266,36 @@ async def execute_workflow(request: Request):
     profile_id = data.get('profile_id', '1')
     run_variables = data.get('run_variables', {})
     global_state = data.get('global_state', {})
+
+    user_id = data.get('user_id', 'user1')
+
+    # --- SAAS QUOTA CHECK ---
+    if user_id:
+        import sqlite3
+        import os
+        try:
+            db_path = os.path.join(os.path.dirname(__file__), 'dev.db')
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+
+            # Auto-create user for seamless mock-auth experience
+            cursor.execute("INSERT OR IGNORE INTO User (id, email, tokens_balance, createdAt, updatedAt) VALUES (?, ?, 5, datetime('now'), datetime('now'))", (user_id, f"{user_id}@example.com"))
+            conn.commit()
+
+            cursor.execute("SELECT tokens_balance FROM User WHERE id = ?", (user_id,))
+            row = cursor.fetchone()
+            if row:
+                quota = row[0]
+                if quota <= 0:
+                    conn.close()
+                    return JSONResponse({"error": "[SYSTEM_ERROR] 免费额度已耗尽 (Quota Exceeded). 请充值获取更多额度。"}, status_code=403)
+                else:
+                    cursor.execute("UPDATE User SET tokens_balance = tokens_balance - 1 WHERE id = ?", (user_id,))
+                    conn.commit()
+            conn.close()
+        except Exception as e:
+            logging.error(f"Quota check failed: {e}")
+    # ------------------------
 
     if not steps:
         return JSONResponse({"error": "No steps provided in workflow."}, status_code=400)

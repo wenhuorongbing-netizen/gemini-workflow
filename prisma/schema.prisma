@@ -7,9 +7,23 @@ datasource db {
   url      = "file:../dev.db"
 }
 
+model User {
+  id             String      @id @default(cuid())
+  email          String      @unique
+  tokens_balance Int         @default(5)
+  geminiApiKey   String?
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+
+  workspaces     Workspace[]
+  runHistory     RunHistory[]
+}
+
 model Workspace {
   id        String   @id @default(cuid())
   name      String
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -33,6 +47,8 @@ model RunHistory {
   id           String   @id @default(cuid())
   workflowId   String
   workflow     WorkflowBlueprint @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   status       String
   logs         String   // JSON string of execution SSE logs
   results      String   // JSON string of explicit Node ID results map
