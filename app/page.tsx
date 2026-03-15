@@ -112,6 +112,7 @@ const nodeTypes = {
   agentic_loop: AgentLoopNode,
   state: StateNode,
   file: FileNode,
+  webhook: WebhookNode,
 };
 
 const initialNodes: Node[] = [
@@ -397,6 +398,65 @@ const PropertiesPanel = ({ selectedNodeId, nodes, updateNodeData, isPlaybackMode
                           }} />
                       </label>
                   )}
+                </div>
+              </div>
+            )}
+
+            {node.type === 'webhook' && (
+              <div className="space-y-4">
+                <div className="relative">
+                <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Target URL</label>
+                <input
+                  type="text"
+                  className={`w-full px-3 py-2 border rounded text-sm focus:outline-none focus:ring-2 ${
+                    (node.data.url && !(node.data.url as string).startsWith('http://') && !(node.data.url as string).startsWith('https://'))
+                      ? 'border-red-500 focus:ring-red-500 bg-red-50 text-red-900'
+                      : 'border-slate-300 focus:ring-fuchsia-500 focus:border-fuchsia-500'
+                  }`}
+                  value={node.data.url as string || ''}
+                  onChange={(e) => updateNodeData(node.id, { url: e.target.value })}
+                  disabled={isPlaybackMode}
+                  placeholder="https://hooks.zapier.com/..."
+                />
+                {(node.data.url && !(node.data.url as string).startsWith('http://') && !(node.data.url as string).startsWith('https://')) && (
+                  <div className="absolute -top-8 right-0 bg-red-600 text-white text-[10px] px-2 py-1 rounded shadow-lg after:content-[''] after:absolute after:top-full after:right-4 after:border-4 after:border-transparent after:border-t-red-600">
+                    ⚠️ Must start with http:// or https://
+                  </div>
+                )}
+                </div>
+                <div>
+                  <div className="flex justify-between items-center mb-1">
+                    <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider">Payload Template (JSON)</label>
+
+                    <div className="relative group">
+                      <button className="text-xs bg-slate-200 hover:bg-fuchsia-100 text-fuchsia-700 px-2 py-0.5 rounded transition InsertVariableBtn">
+                        Insert Variable
+                      </button>
+                      <div className="absolute right-0 top-full mt-1 w-48 bg-white border border-slate-200 rounded-md shadow-xl opacity-0 group-hover:opacity-100 pointer-events-none group-hover:pointer-events-auto transition-opacity z-50 p-1 flex flex-col gap-1 max-h-48 overflow-y-auto">
+                        {nodes.filter((n: any) => n.id !== node.id).map((n: any) => (
+                          <button
+                            key={n.id}
+                            onClick={() => {
+                              const newVal = (node.data.prompt || '') + ` {{${n.id}}}`;
+                              updateNodeData(node.id, { prompt: newVal });
+                            }}
+                            className="text-left text-xs px-2 py-1.5 hover:bg-slate-100 rounded text-slate-700 truncate"
+                            disabled={isPlaybackMode}
+                          >
+                            <span className="font-semibold">{n.type}</span>: {String(n.data.prompt || n.data.url || 'Node')}
+                          </button>
+                        ))}
+                        {nodes.length <= 1 && <div className="text-xs text-slate-400 p-2 text-center">No other nodes</div>}
+                      </div>
+                    </div>
+                  </div>
+                  <textarea
+                    className="w-full h-32 px-3 py-2 border border-slate-300 rounded text-sm font-mono focus:outline-none focus:ring-2 focus:ring-fuchsia-500 focus:border-fuchsia-500"
+                    value={node.data.prompt as string || ''}
+                    onChange={(e) => updateNodeData(node.id, { prompt: e.target.value })}
+                    disabled={isPlaybackMode}
+                    placeholder='{"message": "{{NODE_1_ID}}"}'
+                  />
                 </div>
               </div>
             )}
@@ -1367,6 +1427,7 @@ export default function AppShell() {
                       if (n.type === 'scraper' && !n.data.url) { inputs.push({ id: n.id, type: 'url', label: 'Target URL' }); }
                       if (n.type === 'gemini' && !n.data.prompt) { inputs.push({ id: n.id, type: 'prompt', label: 'AI Prompt' }); }
                       if (n.type === 'agentic_loop' && !n.data.url) { inputs.push({ id: n.id, type: 'url', label: 'Target URL' }); }
+                      if (n.type === 'webhook' && !n.data.url) { inputs.push({ id: n.id, type: 'url', label: 'Webhook URL' }); }
                   });
 
                   try {
@@ -1394,6 +1455,7 @@ export default function AppShell() {
                 <span className="text-sm font-bold text-slate-500 mr-2 uppercase tracking-wide">Nodes:</span>
                 <button onClick={() => addNode('gemini')} className="px-3 py-1.5 bg-white border border-slate-300 rounded text-sm font-medium hover:bg-blue-50 text-blue-700 transition flex items-center gap-1"><Bot size={14}/> Gemini AI</button>
                 <button onClick={() => addNode('scraper')} className="px-3 py-1.5 bg-white border border-slate-300 rounded text-sm font-medium hover:bg-amber-50 text-amber-700 transition flex items-center gap-1"><Globe size={14}/> Web Scraper</button>
+                <button onClick={() => addNode('webhook')} className="px-3 py-1.5 bg-white border border-slate-300 rounded text-sm font-medium hover:bg-fuchsia-50 text-fuchsia-700 transition flex items-center gap-1"><Globe size={14}/> Webhook</button>
                 <button onClick={() => addNode('file')} className="px-3 py-1.5 bg-white border border-slate-300 rounded text-sm font-medium hover:bg-emerald-50 text-emerald-700 transition flex items-center gap-1"><Database size={14}/> Upload File</button>
                 <button onClick={() => addNode('agentic_loop')} className="px-3 py-1.5 bg-white border border-slate-300 rounded text-sm font-medium hover:bg-purple-50 text-purple-700 transition flex items-center gap-1"><Repeat size={14}/> Agent Loop</button>
                 <button onClick={() => addNode('state')} className="px-3 py-1.5 bg-white border border-slate-300 rounded text-sm font-medium hover:bg-slate-200 text-slate-700 transition flex items-center gap-1"><Database size={14}/> Global State</button>
