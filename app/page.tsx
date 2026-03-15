@@ -963,6 +963,7 @@ export default function AppShell() {
                     setIsExecuting(false);
                     localStorage.removeItem('current_task_id');
                     eventSource.close();
+                    fetchUserStats();
                 }
             } catch (e) {
                 console.error("Error parsing JSON:", e, event.data);

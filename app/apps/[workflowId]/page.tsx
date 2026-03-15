@@ -205,6 +205,7 @@ export default function MagicFormApp() {
                     if (parsed.status === 'Workflow Finished' || parsed.status === 'Error' || parsed.status === 'Canceled') {
                         setIsExecuting(false);
                         eventSource.close();
+                        fetchRecentRuns(workflowId);
                     }
                 } catch(e) {}
             };

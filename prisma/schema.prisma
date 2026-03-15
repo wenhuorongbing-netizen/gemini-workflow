@@ -11,6 +11,7 @@ model User {
   id             String      @id @default(cuid())
   email          String      @unique
   tokens_balance Int         @default(5)
+  geminiApiKey   String?
   createdAt      DateTime    @default(now())
   updatedAt      DateTime    @updatedAt
 
