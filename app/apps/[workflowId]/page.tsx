@@ -83,6 +83,7 @@ export default function MagicFormApp() {
 
     const [isExecuting, setIsExecuting] = useState(false);
     const [logs, setLogs] = useState<any[]>([]);
+    const [recentRuns, setRecentRuns] = useState<any[]>([]);
     const logsEndRef = useRef<HTMLDivElement>(null);
 
     useEffect(() => {
@@ -101,7 +102,10 @@ export default function MagicFormApp() {
                 let foundWf = null;
                 for (const ws of wss) {
                     const wf = ws.workflows?.find((w: any) => w.id === workflowId);
-                    if (wf) { foundWf = wf; break; }
+                    if (wf) {
+                        foundWf = { ...wf, workspace: ws };
+                        break;
+                    }
                 }
 
                 if (foundWf) {
@@ -114,8 +118,19 @@ export default function MagicFormApp() {
                     const initialVals: Record<string, string> = {};
                     parsedInputs.forEach((i: any) => initialVals[i.id] = "");
                     setInputValues(initialVals);
+
+                    fetchRecentRuns(foundWf.id);
                 }
             } catch(e) { console.error(e); }
+        };
+
+        const fetchRecentRuns = async (wid: string) => {
+            try {
+                const rRes = await fetch(`/api/runs/app/${wid}`);
+                if (rRes.ok) {
+                    setRecentRuns(await rRes.json());
+                }
+            } catch(e) {}
         };
         fetchWf();
     }, [workflowId]);
@@ -208,8 +223,13 @@ export default function MagicFormApp() {
 
                 <div className="bg-white rounded-2xl shadow-xl border border-slate-200 overflow-hidden">
                     <div className="bg-blue-600 px-8 py-10 text-white text-center">
-                        <div className="bg-white/20 w-16 h-16 rounded-2xl flex items-center justify-center mx-auto mb-4 backdrop-blur-sm">
+                        <div className="bg-white/20 w-16 h-16 rounded-2xl flex items-center justify-center mx-auto mb-4 backdrop-blur-sm relative">
                             <Bot size={32} />
+                            {workflow?.workspace?.quota !== undefined && (
+                                <div className="absolute -right-16 -top-4 bg-amber-500 text-white text-xs font-bold px-2 py-1 rounded-full shadow-lg border-2 border-amber-400 whitespace-nowrap z-10">
+                                    ⚡ Tokens left: {workflow.workspace.quota}
+                                </div>
+                            )}
                         </div>
                         <h1 className="text-3xl font-extrabold tracking-tight mb-2">AI Automation</h1>
                         <p className="text-blue-100 opacity-90">Fill out the required parameters below to launch.</p>
@@ -262,6 +282,41 @@ export default function MagicFormApp() {
                                  </div>
                              ))}
                              <div ref={logsEndRef}/>
+                         </div>
+                    </div>
+                )}
+
+                {recentRuns.length > 0 && !isExecuting && (
+                    <div className="mt-8 bg-white rounded-xl shadow-md border border-slate-200 overflow-hidden">
+                         <div className="bg-slate-50 px-6 py-4 border-b border-slate-200">
+                             <h3 className="font-bold text-slate-700">Recent Outputs</h3>
+                         </div>
+                         <div className="divide-y divide-slate-100">
+                             {recentRuns.map(run => (
+                                 <div key={run.id} className="p-6">
+                                     <div className="flex justify-between items-center mb-4">
+                                         <span className={`text-xs font-bold px-2 py-1 rounded ${run.status === 'Workflow Finished' || run.status === 'Complete' ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>
+                                             {run.status === 'Workflow Finished' ? 'Success' : 'Failed'}
+                                         </span>
+                                         <span className="text-xs text-slate-400 font-mono">
+                                             {new Date(run.createdAt).toLocaleString()}
+                                         </span>
+                                     </div>
+                                     <div className="text-sm text-slate-600 bg-slate-50 p-4 rounded-lg font-mono overflow-x-auto whitespace-pre-wrap max-h-64 overflow-y-auto">
+                                         {(() => {
+                                             try {
+                                                 const results = JSON.parse(run.results);
+                                                 // Try to find the last step's result if it exists, otherwise dump all
+                                                 const keys = Object.keys(results);
+                                                 if (keys.length > 0) return results[keys[keys.length - 1]];
+                                                 return "No results recorded.";
+                                             } catch(e) {
+                                                 return "Could not parse results.";
+                                             }
+                                         })()}
+                                     </div>
+                                 </div>
+                             ))}
                          </div>
                     </div>
                 )}

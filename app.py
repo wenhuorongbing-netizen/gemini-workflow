@@ -1267,6 +1267,31 @@ async def execute_workflow(request: Request):
     run_variables = data.get('run_variables', {})
     global_state = data.get('global_state', {})
 
+    # --- SAAS QUOTA CHECK ---
+    if workspace_id and workspace_id != "temp":
+        import sqlite3
+        import os
+        try:
+            db_path = os.path.join(os.path.dirname(__file__), 'dev.db')
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+            cursor.execute("SELECT quota FROM Workspace WHERE id = ?", (workspace_id,))
+            row = cursor.fetchone()
+            if row:
+                quota = row[0]
+                if quota <= 0:
+                    conn.close()
+                    # We return a specific error structure to feed the SSE or prompt directly.
+                    # Since this is before task start, we just return a 403 or 400.
+                    return JSONResponse({"error": "[SYSTEM_ERROR] 免费额度已耗尽 (Quota Exceeded). 请充值获取更多额度。"}, status_code=403)
+                else:
+                    cursor.execute("UPDATE Workspace SET quota = quota - 1 WHERE id = ?", (workspace_id,))
+                    conn.commit()
+            conn.close()
+        except Exception as e:
+            logging.error(f"Quota check failed: {e}")
+    # ------------------------
+
     if not steps:
         return JSONResponse({"error": "No steps provided in workflow."}, status_code=400)
 

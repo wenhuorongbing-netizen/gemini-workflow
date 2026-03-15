@@ -10,6 +10,7 @@ datasource db {
 model Workspace {
   id        String   @id @default(cuid())
   name      String
+  quota     Int      @default(5)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 

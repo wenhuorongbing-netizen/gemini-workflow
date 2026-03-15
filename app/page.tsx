@@ -1164,9 +1164,16 @@ export default function AppShell() {
             <Bot size={20} className="text-blue-500" />
             Gemini Builder
           </h1>
-          <button onClick={() => setShowAccountModal(true)} className="text-xs bg-slate-800 text-slate-300 px-2 py-1 rounded hover:bg-slate-700 transition">
-              👤 Accounts
-          </button>
+          <div className="flex flex-col gap-1 items-end">
+            {selectedWorkspace && selectedWorkspace.quota !== undefined && (
+                <span className="text-[10px] bg-amber-500/20 text-amber-400 px-2 py-0.5 rounded-full border border-amber-500/30 font-bold whitespace-nowrap">
+                    ⚡ Tokens left: {selectedWorkspace.quota}
+                </span>
+            )}
+            <button onClick={() => setShowAccountModal(true)} className="text-[10px] bg-slate-800 text-slate-300 px-2 py-1 rounded hover:bg-slate-700 transition">
+                👤 Accounts
+            </button>
+          </div>
         </div>
 
         <div className="flex-1 overflow-y-auto p-3 space-y-1">
@@ -1468,7 +1475,7 @@ export default function AppShell() {
                     onClick={async () => {
                         setIsLoggingIn(true);
                         try {
-                            const res = await fetch(`http://127.0.0.1:5000/api/accounts/login?profile_id=${accountProfileStr}`, { method: 'POST' });
+                            const res = await fetch(`/api/accounts/login?profile_id=${accountProfileStr}`, { method: 'POST' });
                             const data = await res.json();
                             if(data.status === 'success') {
                                 alert(data.message);
