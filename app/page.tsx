@@ -491,6 +491,10 @@ export default function AppShell() {
   const [playbackRun, setPlaybackRun] = useState<any | null>(null);
   const isPlaybackMode = !!playbackRun;
 
+  const [showAccountModal, setShowAccountModal] = useState(false);
+  const [accountProfileStr, setAccountProfileStr] = useState("1");
+  const [isLoggingIn, setIsLoggingIn] = useState(false);
+
   useEffect(() => {
     logsEndRef.current?.scrollIntoView(false);
   }, [logs]);
@@ -518,7 +522,7 @@ export default function AppShell() {
     }, 1000);
 
     return () => clearTimeout(timeoutId);
-  }, [nodes, edges, selectedWorkspace, isLoading]);
+  }, [nodes, edges, selectedWorkspace, isLoading, isPlaybackMode]);
 
   // Animated Edges Logic
   useEffect(() => {
@@ -632,7 +636,7 @@ export default function AppShell() {
     if (savedTaskId) {
       console.log("Resuming task:", savedTaskId);
       setIsExecuting(true);
-      const eventSource = new EventSource(`http://127.0.0.1:8000/api/logs/${savedTaskId}`);
+      const eventSource = new EventSource(`http://127.0.0.1:5000/api/logs/${savedTaskId}`);
 
         eventSource.onmessage = async (event) => {
             try {
@@ -755,7 +759,7 @@ export default function AppShell() {
       });
 
       try {
-        const response = await fetch("http://127.0.0.1:8000/execute", {
+        const response = await fetch("http://127.0.0.1:5000/execute", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ steps: compiledSteps, workspace_id: selectedWorkspace?.id || "temp", profile_id: "1", global_state })
@@ -776,7 +780,7 @@ export default function AppShell() {
         }
 
         localStorage.setItem('current_task_id', taskId);
-        const eventSource = new EventSource(`http://127.0.0.1:8000/api/logs/${taskId}`);
+        const eventSource = new EventSource(`http://127.0.0.1:5000/api/logs/${taskId}`);
 
         eventSource.onmessage = async (event) => {
             try {
@@ -1020,7 +1024,7 @@ export default function AppShell() {
                   if (!selectedWorkspace || nodes.length === 0) { alert("Add nodes before publishing."); return; }
 
                   // Extract inputs: URLs that are empty in Scraper, Prompts that are empty in Gemini
-                  const inputs = [];
+                  const inputs: any[] = [];
                   nodes.forEach(n => {
                       if (n.type === 'scraper' && !n.data.url) { inputs.push({ id: n.id, type: 'url', label: 'Target URL' }); }
                       if (n.type === 'gemini' && !n.data.prompt) { inputs.push({ id: n.id, type: 'prompt', label: 'AI Prompt' }); }
@@ -1028,7 +1032,7 @@ export default function AppShell() {
                   });
 
                   try {
-                      const res = await fetch(`/api/workflows/${selectedWorkspace.workflows && selectedWorkspace.workflows.length > 0 ? selectedWorkspace.workflows[0].id : ''}/publish`, {
+                      const res = await fetch(`/api/workflows/${(selectedWorkspace as any).workflows && (selectedWorkspace as any).workflows.length > 0 ? (selectedWorkspace as any).workflows[0].id : ''}/publish`, {
                           method: 'POST',
                           headers: { 'Content-Type': 'application/json' },
                           body: JSON.stringify({ isPublished: true, publishedInputs: inputs })
@@ -1107,9 +1111,9 @@ export default function AppShell() {
                                         try {
                                             const taskId = localStorage.getItem('current_task_id');
                                             if (taskId) {
-                                                await fetch(`http://127.0.0.1:8000/stop_task/${taskId}`, { method: 'POST' });
+                                                await fetch(`http://127.0.0.1:5000/stop_task/${taskId}`, { method: 'POST' });
                                             } else {
-                                                await fetch("http://127.0.0.1:8000/stop");
+                                                await fetch("http://127.0.0.1:5000/stop");
                                             }
                                             setIsExecuting(false);
                                         } catch (e) {}
@@ -1172,7 +1176,7 @@ export default function AppShell() {
                     onClick={async () => {
                         setIsLoggingIn(true);
                         try {
-                            const res = await fetch(`http://127.0.0.1:8000/api/accounts/login?profile_id=${accountProfileStr}`, { method: 'POST' });
+                            const res = await fetch(`http://127.0.0.1:5000/api/accounts/login?profile_id=${accountProfileStr}`, { method: 'POST' });
                             const data = await res.json();
                             if(data.status === 'success') {
                                 alert(data.message);

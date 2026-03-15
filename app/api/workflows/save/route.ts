@@ -23,7 +23,7 @@ export async function POST(request: NextRequest) {
     if (triggerNodes.length > 0) {
       try {
         const cronExpr = triggerNodes[0].data.cron || '0 0 * * *';
-        fetch('http://127.0.0.1:8000/execute', {
+        fetch('http://127.0.0.1:5000/execute', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({

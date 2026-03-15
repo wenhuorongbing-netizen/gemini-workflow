@@ -1,6 +1,7 @@
 from fastapi import FastAPI, Request, BackgroundTasks, HTTPException, UploadFile, File
 from fastapi.templating import Jinja2Templates
 from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 import os
 import asyncio
 import logging
@@ -8,6 +9,12 @@ from bot import GeminiBot, JulesBot
 import json
 import uuid
 import re
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
+
+app = FastAPI()
 
 @app.post("/api/accounts/login")
 async def login_account(profile_id: str):
@@ -30,18 +37,6 @@ async def upload_file(file: UploadFile = File(...)):
         return {"status": "success", "path": file_path}
     except Exception as e:
         return {"status": "error", "message": str(e)}
-from fastapi.middleware.cors import CORSMiddleware
-import asyncio
-import logging
-from bot import GeminiBot, JulesBot
-import json
-import os
-from watchdog.observers import Observer
-from watchdog.events import FileSystemEventHandler
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.cron import CronTrigger
-
-app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
@@ -654,7 +649,10 @@ async def run_workflow_engine(steps, workspace_id, stream_queue=None, profile_id
                     accumulated_context += f"\n\nJules: {jules_response}"
 
                     # 3. Next iteration prompt
-                    current_gemini_prompt = f"Jules has finished with the following output/status: {jules_response}\n\nPlease review this. If everything is correct and no further coding is needed, reply with 'FINAL_REVIEW_COMPLETE'. Otherwise, provide the next set of coding instructions for Jules."
+                    if "system crash and was rebooted" in jules_response:
+                        pass # current_gemini_prompt is already set to the recovery prompt
+                    else:
+                        current_gemini_prompt = f"Jules has finished with the following output/status: {jules_response}\n\nPlease review this. If everything is correct and no further coding is needed, reply with 'FINAL_REVIEW_COMPLETE'. Otherwise, provide the next set of coding instructions for Jules."
                     loop_result = f"Latest Jules Output: {jules_response}\nLatest Gemini Review: {gemini_response}"
 
                 await jules_bot.quit()
