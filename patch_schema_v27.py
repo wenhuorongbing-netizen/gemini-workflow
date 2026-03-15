@@ -1,4 +1,7 @@
-generator client {
+import sys
+
+with open('prisma/schema.prisma', 'w') as f:
+    f.write('''generator client {
   provider = "prisma-client-js"
 }
 
@@ -55,3 +58,4 @@ model RunHistory {
   edges        String?
   createdAt    DateTime @default(now())
 }
+''')

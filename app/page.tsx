@@ -778,6 +778,26 @@ export default function AppShell() {
   const [showAccountModal, setShowAccountModal] = useState(false);
   const [accountProfileStr, setAccountProfileStr] = useState("1");
   const [isLoggingIn, setIsLoggingIn] = useState(false);
+  const [currentUserId, setCurrentUserId] = useState<string>("user1");
+  const [userStats, setUserStats] = useState<any>(null);
+
+  useEffect(() => {
+    const savedUserId = localStorage.getItem('current_userId');
+    if (savedUserId) setCurrentUserId(savedUserId);
+  }, []);
+
+  useEffect(() => {
+    localStorage.setItem('current_userId', currentUserId);
+    fetchWorkspaces();
+    fetchUserStats();
+  }, [currentUserId]);
+
+  const fetchUserStats = async () => {
+      try {
+          const res = await fetch('/api/user', { headers: { 'x-user-id': currentUserId } });
+          if (res.ok) setUserStats(await res.json());
+      } catch(e) {}
+  };
 
   useEffect(() => {
     logsEndRef.current?.scrollIntoView(false);
@@ -795,9 +815,7 @@ export default function AppShell() {
     if (!selectedWorkspace || isLoading || isPlaybackMode) return;
 
     const timeoutId = setTimeout(() => {
-        fetch(`/api/workflows/save`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+        fetch(`/api/workflows/save`, { method: "POST", headers: { "Content-Type": "application/json", "x-user-id": currentUserId },
             body: JSON.stringify({ workspaceId: selectedWorkspace.id, nodes, edges })
         }).then(() => {
             setIsSyncing(true);
@@ -825,9 +843,7 @@ export default function AppShell() {
   const saveWorkflowSilent = async () => {
     if (!selectedWorkspace) return;
     try {
-        await fetch(`/api/workflows/${selectedWorkspace.id}`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+        await fetch(`/api/workflows/${selectedWorkspace.id}`, { method: "POST", headers: { "Content-Type": "application/json", "x-user-id": currentUserId },
             body: JSON.stringify({ nodes, edges })
         });
     } catch (e) {
@@ -837,7 +853,7 @@ export default function AppShell() {
 
   const fetchWorkflowData = async (workspaceId: string) => {
     try {
-      const res = await fetch(`/api/workflows/${workspaceId}`);
+      const res = await fetch(`/api/workflows/${workspaceId}`, { headers: { "x-user-id": currentUserId } });
       if (res.ok) {
         const data = await res.json();
         if (data.nodes && data.nodes.length > 0) {
@@ -849,7 +865,7 @@ export default function AppShell() {
         }
       }
 
-      const runRes = await fetch(`/api/runs/${workspaceId}`);
+      const runRes = await fetch(`/api/runs/${workspaceId}`, { headers: { "x-user-id": currentUserId } });
       if (runRes.ok) {
           setRunHistory(await runRes.json());
       }
@@ -862,9 +878,7 @@ export default function AppShell() {
     if (!selectedWorkspace) return;
     setIsSaving(true);
     try {
-        const res = await fetch(`/api/workflows/${selectedWorkspace.id}`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+        const res = await fetch(`/api/workflows/${selectedWorkspace.id}`, { method: "POST", headers: { "Content-Type": "application/json", "x-user-id": currentUserId },
             body: JSON.stringify({ nodes, edges })
         });
         if (res.ok) {
@@ -966,7 +980,7 @@ export default function AppShell() {
   const fetchWorkspaces = async () => {
     setIsLoading(true);
     try {
-      const res = await fetch("/api/workspaces");
+      const res = await fetch("/api/workspaces", { headers: { "x-user-id": currentUserId } });
       if (res.ok) {
         const data = await res.json();
         setWorkspaces(data);
@@ -996,11 +1010,7 @@ export default function AppShell() {
     if (!name) return;
 
     try {
-      const res = await fetch("/api/workspaces", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name }),
-      });
+      const res = await fetch("/api/workspaces", { method: "POST", headers: { "Content-Type": "application/json", "x-user-id": currentUserId }, body: JSON.stringify({ name }) });
       if (res.ok) {
         const newWs = await res.json();
         fetchWorkspaces();
@@ -1046,7 +1056,7 @@ export default function AppShell() {
         const response = await fetch("http://127.0.0.1:5000/execute", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ steps: compiledSteps, workspace_id: selectedWorkspace?.id || "temp", profile_id: "1", global_state })
+          body: JSON.stringify({ steps: compiledSteps, workspace_id: selectedWorkspace?.id || "temp", profile_id: "1", global_state, user_id: currentUserId })
         });
 
         if (!response.ok) {
@@ -1282,9 +1292,37 @@ export default function AppShell() {
               {selectedWorkspace ? selectedWorkspace.name : "Select a Workspace"}
             </h2>
 
+            {/* User Switcher Dropdown */}
+            <select
+                value={currentUserId}
+                onChange={e => setCurrentUserId(e.target.value)}
+                className="ml-4 text-xs border-slate-300 rounded px-2 py-1 bg-slate-100 text-slate-600 focus:ring-blue-500 font-medium"
+            >
+                <option value="user1">User 1 (Free)</option>
+                <option value="user2">User 2 (Team)</option>
+                <option value="user3">User 3 (Enterprise)</option>
+            </select>
           </div>
 
-          <div className="flex items-center space-x-3">
+          <div className="flex items-center space-x-4">
+            {/* Token Analytics Widget */}
+            {userStats && (
+                <div className="hidden md:flex flex-col items-end mr-6 pr-6 border-r border-slate-200">
+                    <div className="text-xs font-bold text-slate-500 mb-1 flex items-center gap-1">
+                        <Zap size={12} className={userStats.tokens_balance > 0 ? "text-amber-500" : "text-slate-400"}/>
+                        {userStats.tokens_balance} Tokens Left
+                    </div>
+                    <div className="w-32 h-1.5 bg-slate-200 rounded-full overflow-hidden flex">
+                        <div
+                            className={`h-full ${userStats.tokens_balance > 100 ? 'bg-indigo-500' : userStats.tokens_balance > 0 ? 'bg-amber-500' : 'bg-red-500'}`}
+                            style={{ width: `${Math.min((userStats.tokens_balance / 500) * 100, 100)}%` }}
+                        ></div>
+                    </div>
+                    <div className="text-[10px] text-slate-400 mt-1">{userStats.totalRunsThisMonth} automated runs this month</div>
+                    <a href="/pricing" className="text-[10px] text-blue-600 font-bold mt-0.5 hover:underline">Upgrade Plan →</a>
+                </div>
+            )}
+
             <div className="flex items-center gap-2 mr-2">
                 {isSyncing ? (
                     <div className="flex items-center gap-1 text-emerald-600 text-xs font-bold animate-pulse">
@@ -1331,9 +1369,7 @@ export default function AppShell() {
                   });
 
                   try {
-                      const res = await fetch(`/api/workflows/${(selectedWorkspace as any).workflows && (selectedWorkspace as any).workflows.length > 0 ? (selectedWorkspace as any).workflows[0].id : ''}/publish`, {
-                          method: 'POST',
-                          headers: { 'Content-Type': 'application/json' },
+                      const res = await fetch(`/api/workflows/${(selectedWorkspace as any).workflows && (selectedWorkspace as any).workflows.length > 0 ? (selectedWorkspace as any).workflows[0].id : \'\'}/publish`, { method: "POST", headers: { "Content-Type": "application/json", "x-user-id": currentUserId },
                           body: JSON.stringify({ isPublished: true, publishedInputs: inputs })
                       });
                       if(res.ok) {

@@ -7,8 +7,11 @@ export async function GET(
 ) {
     try {
         const { workflowId } = await params;
+        const userId = request.headers.get('x-user-id');
+        if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
         const runs = await prisma.runHistory.findMany({
-            where: { workflowId },
+            where: { workflowId, userId },
             orderBy: { createdAt: 'desc' },
             take: 5
         });

@@ -90,6 +90,13 @@ export default function MagicFormApp() {
         logsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }, [logs]);
 
+    const [currentUserId, setCurrentUserId] = useState<string>("user1");
+
+    useEffect(() => {
+        const savedUserId = localStorage.getItem('current_userId');
+        if (savedUserId) setCurrentUserId(savedUserId);
+    }, []);
+
     useEffect(() => {
         if (!workflowId) return;
 
@@ -97,7 +104,7 @@ export default function MagicFormApp() {
             try {
                 // We reuse the workspace fetch by just filtering the workspace's workflows.
                 // In a true prod app we'd have a specific GET /api/workflows/[id]
-                const res = await fetch('/api/workspaces');
+                const res = await fetch('/api/workspaces', { headers: { 'x-user-id': currentUserId } });
                 const wss = await res.json();
                 let foundWf = null;
                 for (const ws of wss) {
@@ -126,7 +133,7 @@ export default function MagicFormApp() {
 
         const fetchRecentRuns = async (wid: string) => {
             try {
-                const rRes = await fetch(`/api/runs/app/${wid}`);
+                const rRes = await fetch(`/api/runs/app/${wid}`, { headers: { 'x-user-id': currentUserId } });
                 if (rRes.ok) {
                     setRecentRuns(await rRes.json());
                 }
@@ -162,10 +169,10 @@ export default function MagicFormApp() {
         setIsExecuting(true);
 
         try {
-            const response = await fetch("http://127.0.0.1:8000/execute", {
+            const response = await fetch("http://127.0.0.1:5000/execute", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ steps: compiledData.steps, nodeOrder: compiledData.nodeOrder }),
+                body: JSON.stringify({ steps: compiledData.steps, nodeOrder: compiledData.nodeOrder, user_id: currentUserId }),
             });
 
             if (!response.ok) {
@@ -176,7 +183,7 @@ export default function MagicFormApp() {
             const data = await response.json();
             const taskId = data.task_id;
 
-            const eventSource = new EventSource(`http://127.0.0.1:8000/api/logs/${taskId}`);
+            const eventSource = new EventSource(`http://127.0.0.1:5000/api/logs/${taskId}`);
 
             eventSource.onmessage = async (event) => {
                 if (event.data === "__DONE__") {
