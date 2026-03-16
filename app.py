@@ -26,29 +26,30 @@ gh_client = Github(GITHUB_TOKEN) if GITHUB_TOKEN else None
 class AuthException(Exception):
     pass
 
-def get_github_repo():
-    if not gh_client or not GITHUB_REPO:
-        raise AuthException("Please add a valid GITHUB_TOKEN to your .env file")
+def get_github_repo(target_repo=None):
+    repo_name = target_repo if target_repo else GITHUB_REPO
+    if not gh_client or not repo_name:
+        raise AuthException("Please add a valid GITHUB_TOKEN to your .env file or provide target_repo")
     from github.GithubException import GithubException
     try:
-        return gh_client.get_repo(GITHUB_REPO)
+        return gh_client.get_repo(repo_name)
     except GithubException as e:
         if e.status == 401:
             raise AuthException("Please add a valid GITHUB_TOKEN to your .env file")
         raise e
 
-def create_feature_branch(base_branch="main", new_branch_name=None):
+def create_feature_branch(base_branch="main", new_branch_name=None, target_repo=None):
     if not new_branch_name:
         raise ValueError("new_branch_name is required")
-    repo = get_github_repo()
+    repo = get_github_repo(target_repo)
     base_ref = repo.get_git_ref(f"heads/{base_branch}")
     repo.create_git_ref(ref=f"refs/heads/{new_branch_name}", sha=base_ref.object.sha)
     return new_branch_name
 
-def get_branch_diff(base_branch="main", compare_branch=None):
+def get_branch_diff(base_branch="main", compare_branch=None, target_repo=None):
     if not compare_branch:
          raise ValueError("compare_branch is required")
-    repo = get_github_repo()
+    repo = get_github_repo(target_repo)
     comparison = repo.compare(base_branch, compare_branch)
     diff = []
     for file in comparison.files:
@@ -65,8 +66,8 @@ def get_branch_diff(base_branch="main", compare_branch=None):
         diff.append(f"File: {file.filename}\nStatus: {file.status}\nDiff:\n{file.patch}\n")
     return "\n".join(diff)
 
-def merge_and_delete_branch(head_branch, base_branch="main"):
-    repo = get_github_repo()
+def merge_and_delete_branch(head_branch, base_branch="main", target_repo=None):
+    repo = get_github_repo(target_repo)
 
     # Check if there is a diff first
     comparison = repo.compare(base_branch, head_branch)
@@ -377,7 +378,7 @@ async def startup_event():
     import os
 
     # Brutal Repository Cleanup (Task 1)
-    cleanup_patterns = ['patch_*.py', '*_verification.png', 'dev.db']
+    cleanup_patterns = ['patch_*.py', '*_verification.png']
     for pattern in cleanup_patterns:
         for filepath in glob.glob(pattern):
             try:
@@ -385,38 +386,6 @@ async def startup_event():
                 logging.info(f"Cleanup: Deleted {filepath}")
             except Exception as e:
                 logging.error(f"Cleanup: Failed to delete {filepath} - {e}")
-
-    # Reinitialize dev.db explicitly after deleting it
-    import sqlite3
-    db_path = os.path.join(os.path.dirname(__file__), 'dev.db')
-    if not os.path.exists(db_path):
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS DevHouseQueue (
-                id TEXT PRIMARY KEY,
-                prompt TEXT,
-                kb_links TEXT,
-                model TEXT,
-                webhook_url TEXT,
-                status TEXT,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                completed_at DATETIME
-            )
-        """)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS DevHouseState (
-                id TEXT PRIMARY KEY,
-                branch TEXT,
-                iteration INTEGER,
-                max_iterations INTEGER,
-                accumulated_context TEXT,
-                status TEXT,
-                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        conn.commit()
-        conn.close()
 
     global bot_semaphore
     global cancel_event
@@ -525,9 +494,9 @@ async def delete_workspace(workspace_id: str):
     return JSONResponse({"status": "deleted"})
 
 @app.get("/api/devhouse/diff")
-async def api_devhouse_diff(compare_branch: str, base_branch: str = "main"):
+async def api_devhouse_diff(compare_branch: str, base_branch: str = "main", target_repo: str = None):
     try:
-        diff = get_branch_diff(base_branch, compare_branch)
+        diff = get_branch_diff(base_branch, compare_branch, target_repo)
         return {"status": "success", "diff": diff}
     except AuthException as e:
         return JSONResponse({"error": str(e)}, status_code=401)
@@ -539,10 +508,11 @@ async def api_devhouse_merge(request: Request):
     data = await request.json()
     head_branch = data.get("head_branch")
     base_branch = data.get("base_branch", "main")
+    target_repo = data.get("target_repo")
     if not head_branch:
         return JSONResponse({"status": "error", "message": "head_branch is required"}, status_code=400)
     try:
-        result = merge_and_delete_branch(head_branch, base_branch)
+        result = merge_and_delete_branch(head_branch, base_branch, target_repo)
         return result
     except AuthException as e:
         return JSONResponse({"error": str(e)}, status_code=401)
@@ -556,12 +526,13 @@ async def api_devhouse_review(request: Request):
     data = await request.json()
     base_branch = data.get("base_branch", "main")
     feature_branch = data.get("feature_branch")
+    target_repo = data.get("target_repo")
 
     if not feature_branch:
         return JSONResponse({"status": "error", "message": "feature_branch is required"}, status_code=400)
 
     try:
-        diff = get_branch_diff(base_branch, feature_branch)
+        diff = get_branch_diff(base_branch, feature_branch, target_repo)
         if not diff.strip():
             return {"status": "no_changes"}
 
@@ -595,6 +566,7 @@ def init_devhouse_queue_db():
         CREATE TABLE IF NOT EXISTS DevHouseQueue (
             id TEXT PRIMARY KEY,
             prompt TEXT,
+            target_repo TEXT,
             kb_links TEXT,
             model TEXT,
             webhook_url TEXT,
@@ -608,18 +580,42 @@ def init_devhouse_queue_db():
 
 init_devhouse_queue_db()
 
-async def run_devhouse_autopilot(task_id, initial_prompt, kb_links, model_type, max_iterations=5):
+async def run_devhouse_autopilot(task_id, initial_prompt, target_repo, kb_links, model_type, max_iterations=5):
     import datetime
     import time
     import google.generativeai as genai
     import bot
+    import os
+    import subprocess
 
     branch_name = f"devhouse-{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}"
     jules_bot = None
     jules_page = None
 
+    # Extract Repo info
+    repo_name = target_repo.split('/')[-1].replace('.git', '')
+    workspace_dir = f"/tmp/devhouse_workspaces/{task_id}_{repo_name}"
+
     try:
         await devhouse_queue.put({"type": "info", "message": f"[PM] Analyzing requirements for Auto-Dev loop..."})
+
+        await devhouse_queue.put({"type": "action", "message": f"[DEV] Cloning {target_repo} into Sandbox..."})
+
+        # Phase 3: Clone Sandbox
+        os.makedirs("/tmp/devhouse_workspaces", exist_ok=True)
+        if os.path.exists(workspace_dir):
+            subprocess.run(["rm", "-rf", workspace_dir], check=True)
+
+        git_token = os.environ.get("GITHUB_TOKEN", "")
+        clone_url = f"https://oauth2:{git_token}@github.com/{target_repo}.git" if git_token else f"https://github.com/{target_repo}.git"
+
+        try:
+            subprocess.run(["git", "clone", clone_url, workspace_dir], check=True, capture_output=True, text=True)
+        except subprocess.CalledProcessError as e:
+            # Mask the token from the exception message
+            error_msg = str(e).replace(git_token, "[REDACTED_TOKEN]") if git_token else str(e)
+            stderr_masked = e.stderr.replace(git_token, "[REDACTED_TOKEN]") if e.stderr and git_token else e.stderr
+            raise Exception(f"Failed to clone repository: {error_msg}. Stderr: {stderr_masked}")
 
         await devhouse_queue.put({"type": "action", "message": f"[DEV] Spawning Jules..."})
 
@@ -627,7 +623,7 @@ async def run_devhouse_autopilot(task_id, initial_prompt, kb_links, model_type, 
         jules_page = await jules_bot.create_new_page()
 
         # Prepare the first instruction for Jules
-        jules_instruction = f"Task: {initial_prompt}\nKnowledge Base: {kb_links}\nBranch: {branch_name}"
+        jules_instruction = f"Task: {initial_prompt}\nKnowledge Base: {kb_links}\nBranch: {branch_name}\n\nIMPORTANT MANDATE: You are operating in a sandbox. The target codebase is located exclusively at: `{workspace_dir}`. All bash commands, file modifications, and git operations MUST be executed within `{workspace_dir}`. Do NOT edit the local engine files."
 
         accumulated_context = jules_instruction
         import sqlite3
@@ -659,7 +655,7 @@ async def run_devhouse_autopilot(task_id, initial_prompt, kb_links, model_type, 
                 logging.error(f"Failed to save DevHouse state: {e}")
 
         start_iteration = 1
-        create_feature_branch("main", branch_name)
+        create_feature_branch("main", branch_name, target_repo)
         save_state(1, accumulated_context, 'running')
 
         empty_diff_count = 0
@@ -704,7 +700,7 @@ async def run_devhouse_autopilot(task_id, initial_prompt, kb_links, model_type, 
             await devhouse_queue.put({"type": "action", "message": f"[GIT] Code pushed by Jules. Fetching diff for branch '{branch_name}'..."})
 
             # Step C: Get Diff
-            diff = get_branch_diff("main", branch_name)
+            diff = get_branch_diff("main", branch_name, target_repo)
 
             if not diff.strip():
                 empty_diff_count += 1
@@ -722,6 +718,7 @@ async def run_devhouse_autopilot(task_id, initial_prompt, kb_links, model_type, 
             try:
                  ci_process = await asyncio.create_subprocess_exec(
                       "npm", "run", "build",
+                      cwd=workspace_dir,
                       stdout=asyncio.subprocess.PIPE,
                       stderr=asyncio.subprocess.PIPE
                  )
@@ -793,7 +790,7 @@ async def run_devhouse_autopilot(task_id, initial_prompt, kb_links, model_type, 
         # End of Loop - Auto-Merge
         await devhouse_queue.put({"type": "action", "message": f"[GIT] DevHouse loop finished. Merging branch '{branch_name}' and cleaning up."})
         save_state(max_iterations, accumulated_context, 'merging')
-        merge_and_delete_branch(branch_name, "main")
+        merge_and_delete_branch(branch_name, "main", target_repo)
         save_state(max_iterations, accumulated_context, 'finished')
 
         await devhouse_queue.put({"type": "info", "message": f"[SYSTEM] Merge complete. DevHouse Autopilot cycle finished."})
@@ -823,7 +820,7 @@ async def queue_runner_loop():
         try:
             conn = sqlite3.connect(db_path)
             cursor = conn.cursor()
-            cursor.execute("SELECT id, prompt, kb_links, model, webhook_url FROM DevHouseQueue WHERE status = 'pending' ORDER BY created_at ASC LIMIT 1")
+            cursor.execute("SELECT id, prompt, target_repo, kb_links, model, webhook_url FROM DevHouseQueue WHERE status = 'pending' ORDER BY created_at ASC LIMIT 1")
             row = cursor.fetchone()
             if not row:
                 # No pending tasks, check if we need to send morning report
@@ -862,7 +859,7 @@ async def queue_runner_loop():
                 queue_running = False
                 break
 
-            task_id, prompt, kb_links, model, webhook_url = row
+            task_id, prompt, target_repo, kb_links, model, webhook_url = row
             cursor.execute("UPDATE DevHouseQueue SET status = 'running', updated_at = datetime('now') WHERE id = ?", (task_id,))
             conn.commit()
             conn.close()
@@ -878,7 +875,7 @@ async def queue_runner_loop():
 
                  success = False
                  try:
-                      await run_devhouse_autopilot(task_id, prompt, kb_links, model)
+                      await run_devhouse_autopilot(task_id, prompt, target_repo, kb_links, model)
                       success = True
                  except Exception as e:
                       logging.error(f"Task {task_id} failed: {e}")
@@ -898,12 +895,15 @@ async def queue_runner_loop():
 async def api_devhouse_queue(request: Request, background_tasks: BackgroundTasks):
     data = await request.json()
     prompt = data.get("prompt")
+    target_repo = data.get("target_repo")
     kb_links = data.get("kbLinks", "")
     model = data.get("model", "Pro")
     webhook_url = data.get("webhookUrl", "")
 
     if not prompt:
         return JSONResponse({"status": "error", "message": "prompt is required"}, status_code=400)
+    if not target_repo:
+        return JSONResponse({"status": "error", "message": "target_repo is required"}, status_code=400)
 
     import sqlite3
     import os
@@ -915,9 +915,9 @@ async def api_devhouse_queue(request: Request, background_tasks: BackgroundTasks
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
         cursor.execute("""
-            INSERT INTO DevHouseQueue (id, prompt, kb_links, model, webhook_url, status)
-            VALUES (?, ?, ?, ?, ?, 'pending')
-        """, (task_id, prompt, kb_links, model, webhook_url))
+            INSERT INTO DevHouseQueue (id, prompt, target_repo, kb_links, model, webhook_url, status)
+            VALUES (?, ?, ?, ?, ?, ?, 'pending')
+        """, (task_id, prompt, target_repo, kb_links, model, webhook_url))
         conn.commit()
         conn.close()
 

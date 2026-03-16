@@ -14,17 +14,18 @@ client = TestClient(app.app)
 def test_get_devhouse_diff(mock_get_branch_diff):
     mock_get_branch_diff.return_value = "File: main.py\nStatus: modified\nDiff:\n+print('hello')\n"
 
-    response = client.get("/api/devhouse/diff?compare_branch=feature-branch")
+    response = client.get("/api/devhouse/diff?compare_branch=feature-branch&target_repo=test/repo")
 
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == "success"
     assert "File: main.py" in data["diff"]
-    mock_get_branch_diff.assert_called_once_with("main", "feature-branch")
+    mock_get_branch_diff.assert_called_once_with("main", "feature-branch", "test/repo")
 
 def test_post_devhouse_queue():
     payload = {
         "prompt": "Build a new header component.",
+        "target_repo": "test/repo",
         "kbLinks": "https://docs.github.com",
         "model": "Pro",
         "webhookUrl": "http://example.com/hook"
@@ -43,7 +44,8 @@ def test_post_devhouse_merge(mock_merge_and_delete_branch):
     mock_merge_and_delete_branch.return_value = {"status": "success", "message": "Branch merged.", "merged": True, "sha": "1234abc"}
 
     payload = {
-        "head_branch": "devhouse-test-123"
+        "head_branch": "devhouse-test-123",
+        "target_repo": "test/repo"
     }
 
     response = client.post("/api/devhouse/merge", json=payload)
@@ -52,14 +54,15 @@ def test_post_devhouse_merge(mock_merge_and_delete_branch):
     data = response.json()
     assert data["status"] == "success"
     assert data["merged"] == True
-    mock_merge_and_delete_branch.assert_called_once_with("devhouse-test-123", "main")
+    mock_merge_and_delete_branch.assert_called_once_with("devhouse-test-123", "main", "test/repo")
 
 @patch('app.get_branch_diff')
 def test_post_devhouse_review_no_changes(mock_get_branch_diff):
     mock_get_branch_diff.return_value = "   "
 
     payload = {
-        "feature_branch": "devhouse-test-123"
+        "feature_branch": "devhouse-test-123",
+        "target_repo": "test/repo"
     }
 
     response = client.post("/api/devhouse/review", json=payload)

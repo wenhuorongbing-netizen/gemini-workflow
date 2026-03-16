@@ -8,6 +8,7 @@ export default function Cockpit() {
     const [prompt, setPrompt] = useState("");
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const [isReviewing, setIsReviewing] = useState(false);
+    const [targetRepo, setTargetRepo] = useState("");
     const [kbLinks, setKbLinks] = useState("");
     const [model, setModel] = useState("Pro");
     const [webhookUrl, setWebhookUrl] = useState("");
@@ -88,18 +89,23 @@ export default function Cockpit() {
             alert("Please enter an initial prompt.");
             return;
         }
+        if (!targetRepo.trim()) {
+            alert("Please enter a Target GitHub Repo URL (e.g. username/repo).");
+            return;
+        }
         setIsStarting(true);
         try {
             const res = await fetch("/api/devhouse/queue", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ prompt, kbLinks, model, webhookUrl })
+                body: JSON.stringify({ prompt, target_repo: targetRepo.trim(), kbLinks, model, webhookUrl })
             });
             const data = await res.json();
             if (!res.ok || data.status !== "success") {
                 addLog(`Failed to add to queue: ${data.error || data.message}`, "error");
             } else {
                 setPrompt("");
+                setTargetRepo("");
                 setKbLinks("");
                 fetchQueue();
             }
@@ -189,6 +195,20 @@ export default function Cockpit() {
                         onChange={(e) => setKbLinks(e.target.value)}
                         placeholder="https://docs.example.com, https://github.com/..."
                         className="w-full p-2 border border-slate-300 rounded focus:ring-2 focus:ring-blue-500 focus:outline-none text-sm"
+                    />
+                </div>
+
+                <div>
+                    <label className="block text-xs font-bold text-slate-700 uppercase mb-1 tracking-wider">
+                        Target GitHub Repo URL *
+                    </label>
+                    <input
+                        type="text"
+                        value={targetRepo}
+                        onChange={(e) => setTargetRepo(e.target.value)}
+                        placeholder="e.g., username/repository"
+                        className="w-full p-2 border border-slate-300 rounded focus:ring-2 focus:ring-blue-500 focus:outline-none text-sm"
+                        required
                     />
                 </div>
 
