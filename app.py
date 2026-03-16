@@ -13,6 +13,59 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from github import Github
+import dotenv
+
+dotenv.load_dotenv()
+
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
+GITHUB_REPO = os.environ.get("GITHUB_REPO", "")
+
+gh_client = Github(GITHUB_TOKEN) if GITHUB_TOKEN else None
+
+def get_github_repo():
+    if not gh_client or not GITHUB_REPO:
+        raise Exception("GitHub client not configured. Check GITHUB_TOKEN and GITHUB_REPO in .env")
+    return gh_client.get_repo(GITHUB_REPO)
+
+def create_feature_branch(base_branch="main", new_branch_name=None):
+    if not new_branch_name:
+        raise ValueError("new_branch_name is required")
+    repo = get_github_repo()
+    base_ref = repo.get_git_ref(f"heads/{base_branch}")
+    repo.create_git_ref(ref=f"refs/heads/{new_branch_name}", sha=base_ref.object.sha)
+    return new_branch_name
+
+def get_branch_diff(base_branch="main", compare_branch=None):
+    if not compare_branch:
+         raise ValueError("compare_branch is required")
+    repo = get_github_repo()
+    comparison = repo.compare(base_branch, compare_branch)
+    diff = []
+    for file in comparison.files:
+        diff.append(f"File: {file.filename}\nStatus: {file.status}\nDiff:\n{file.patch}\n")
+    return "\n".join(diff)
+
+def merge_and_delete_branch(head_branch, base_branch="main"):
+    repo = get_github_repo()
+
+    # Check if there is a diff first
+    comparison = repo.compare(base_branch, head_branch)
+    if comparison.ahead_by == 0:
+        return {"status": "success", "message": "Nothing to merge (branches are identical).", "merged": False}
+
+    # Attempt to merge
+    try:
+        merge_msg = f"Auto-merge {head_branch} into {base_branch}"
+        merge_result = repo.merge(base_branch, head_branch, merge_msg)
+
+        # Delete the branch
+        ref = repo.get_git_ref(f"heads/{head_branch}")
+        ref.delete()
+        return {"status": "success", "message": "Branch merged and deleted successfully.", "merged": True, "sha": merge_result.sha}
+    except Exception as e:
+         return {"status": "error", "message": f"Merge failed: {str(e)}", "merged": False}
+
 
 app = FastAPI()
 
@@ -406,6 +459,41 @@ async def delete_workspace(workspace_id: str):
         del epics[workspace_id]
         save_epics(epics)
     return JSONResponse({"status": "deleted"})
+
+@app.get("/api/devhouse/diff")
+async def api_devhouse_diff(compare_branch: str, base_branch: str = "main"):
+    try:
+        diff = get_branch_diff(base_branch, compare_branch)
+        return {"status": "success", "diff": diff}
+    except Exception as e:
+        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+
+@app.post("/api/devhouse/merge")
+async def api_devhouse_merge(request: Request):
+    data = await request.json()
+    head_branch = data.get("head_branch")
+    base_branch = data.get("base_branch", "main")
+    if not head_branch:
+        return JSONResponse({"status": "error", "message": "head_branch is required"}, status_code=400)
+    try:
+        result = merge_and_delete_branch(head_branch, base_branch)
+        return result
+    except Exception as e:
+        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+
+@app.post("/api/devhouse/start")
+async def api_devhouse_start(request: Request):
+    data = await request.json()
+    prompt = data.get("prompt")
+    if not prompt:
+        return JSONResponse({"status": "error", "message": "prompt is required"}, status_code=400)
+    import datetime
+    new_branch_name = f"devhouse-{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}"
+    try:
+        branch = create_feature_branch("main", new_branch_name)
+        return {"status": "success", "branch": branch, "message": "Started Auto-Dev loop on new branch."}
+    except Exception as e:
+        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
 
 @app.get("/")
 async def index(request: Request):

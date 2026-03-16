@@ -18,12 +18,14 @@ import {
   BackgroundVariant
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { Play, Bot, Globe, Repeat, FileJson, Loader2, CheckCircle2, XCircle, Database, AlertCircle } from "lucide-react";
+import { Play, Bot, Globe, Repeat, FileJson, Loader2, CheckCircle2, XCircle, Database, AlertCircle, Zap } from "lucide-react";
+import Cockpit from "./components/Cockpit";
 
 interface Workspace {
   id: string;
   name: string;
   steps?: any[];
+  quota?: number;
 }
 
 // --- Custom Nodes ---
@@ -112,9 +114,6 @@ const nodeTypes = {
   agentic_loop: AgentLoopNode,
   state: StateNode,
   file: FileNode,
-  webhook: WebhookNode,
-  router: RouterNode,
-  approval: ApprovalNode,
 };
 
 const initialNodes: Node[] = [
@@ -867,7 +866,7 @@ const PropertiesPanel = ({ selectedNodeId, nodes, updateNodeData, isPlaybackMode
 export default function AppShell() {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [selectedWorkspace, setSelectedWorkspace] = useState<Workspace | null>(null);
-  const [activeTab, setActiveTab] = useState<"editor" | "dashboard" | "runs">("editor");
+  const [activeTab, setActiveTab] = useState<"editor" | "cockpit">("editor");
   const [isLoading, setIsLoading] = useState(true);
 
   // React Flow State
@@ -1403,6 +1402,22 @@ export default function AppShell() {
               {selectedWorkspace ? selectedWorkspace.name : "Select a Workspace"}
             </h2>
 
+            {/* View Toggle */}
+            <div className="ml-4 flex bg-slate-100 p-1 rounded-lg">
+                <button
+                    onClick={() => setActiveTab('editor')}
+                    className={`px-4 py-1.5 text-sm font-bold rounded-md transition-colors ${activeTab === 'editor' ? 'bg-white shadow-sm text-blue-600' : 'text-slate-500 hover:text-slate-700'}`}
+                >
+                    Workflow Editor
+                </button>
+                <button
+                    onClick={() => setActiveTab('cockpit')}
+                    className={`px-4 py-1.5 text-sm font-bold rounded-md transition-colors ${activeTab === 'cockpit' ? 'bg-white shadow-sm text-blue-600' : 'text-slate-500 hover:text-slate-700'}`}
+                >
+                    DevHouse Cockpit
+                </button>
+            </div>
+
             {/* User Switcher Dropdown */}
             <select
                 value={currentUserId}
@@ -1481,7 +1496,7 @@ export default function AppShell() {
                   });
 
                   try {
-                      const res = await fetch(`/api/workflows/${(selectedWorkspace as any).workflows && (selectedWorkspace as any).workflows.length > 0 ? (selectedWorkspace as any).workflows[0].id : \'\'}/publish`, { method: "POST", headers: { "Content-Type": "application/json", "x-user-id": currentUserId },
+                      const res = await fetch(`/api/workflows/${(selectedWorkspace as any).workflows && (selectedWorkspace as any).workflows.length > 0 ? (selectedWorkspace as any).workflows[0].id : ''}/publish`, { method: "POST", headers: { "Content-Type": "application/json", "x-user-id": currentUserId },
                           body: JSON.stringify({ isPublished: true, publishedInputs: inputs })
                       });
                       if(res.ok) {
@@ -1500,7 +1515,7 @@ export default function AppShell() {
         </header>
 
         {/* Toolbar */}
-        {true && (
+        {activeTab === "editor" && (
             <div className="bg-slate-100 border-b border-slate-200 px-6 py-2 flex flex-wrap items-center gap-2 z-10 shadow-sm">
                 <span className="text-sm font-bold text-slate-500 mr-2 uppercase tracking-wide">Nodes:</span>
                 <button onClick={() => addNode('gemini')} className="px-3 py-1.5 bg-white border border-slate-300 rounded text-sm font-medium hover:bg-blue-50 text-blue-700 transition flex items-center gap-1"><Bot size={14}/> Gemini AI</button>
@@ -1516,6 +1531,9 @@ export default function AppShell() {
 
         {/* Workspace Content Area */}
         <div className="flex-1 relative w-full h-full">
+          {activeTab === 'cockpit' ? (
+              <Cockpit />
+          ) : (
           <>
              <ReactFlow
                 nodes={nodes}
@@ -1603,6 +1621,7 @@ export default function AppShell() {
                 />
              )}
             </>
+          )}
         </div>
       </main>
       {/* Account Modal */}

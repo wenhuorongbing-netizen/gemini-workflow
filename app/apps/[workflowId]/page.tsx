@@ -254,7 +254,6 @@ export default function MagicFormApp() {
 
         setLogs(prev => [...prev, { status: "Batch Complete", message: "--- All rows processed ---" }]);
         setIsExecuting(false);
-        fetchRecentRuns(workflowId);
     };
 
     const handleRun = async () => {
@@ -271,7 +270,6 @@ export default function MagicFormApp() {
             alert(e.message);
         }
         setIsExecuting(false);
-        fetchRecentRuns(workflowId);
     };
 
     /* Legacy Handle Run implementation replaced above */
@@ -327,7 +325,7 @@ if (!workflow) return <div className="h-screen flex items-center justify-center 
                                                         );
                                                         setCsvData(cleanData);
                                                         if(cleanData.length > 0) {
-                                                            setCsvHeaders(Object.keys(cleanData[0]));
+                                                            setCsvHeaders(Object.keys(cleanData[0] as object));
                                                         }
                                                     }
                                                 },
@@ -496,7 +494,6 @@ if (!workflow) return <div className="h-screen flex items-center justify-center 
                                                         headers: { 'Content-Type': 'application/json', 'x-user-id': currentUserId },
                                                         body: JSON.stringify({ run_id: run.id, action: 'reject' })
                                                     });
-                                                    if(res.ok) fetchRecentRuns(workflowId);
                                                 }} className="px-4 py-2 bg-white text-rose-600 border border-rose-200 hover:bg-rose-50 rounded font-bold text-xs shadow-sm">
                                                     ❌ Reject
                                                 </button>
@@ -514,7 +511,6 @@ if (!workflow) return <div className="h-screen flex items-center justify-center 
                                                             if (event.data === "__DONE__") {
                                                                 eventSource.close();
                                                                 setIsExecuting(false);
-                                                                fetchRecentRuns(workflowId);
                                                                 return;
                                                             }
                                                             try {
@@ -523,7 +519,6 @@ if (!workflow) return <div className="h-screen flex items-center justify-center 
                                                                 if (parsed.status === 'Workflow Finished' || parsed.status === 'Error' || parsed.status === 'Canceled') {
                                                                     setIsExecuting(false);
                                                                     eventSource.close();
-                                                                    fetchRecentRuns(workflowId);
                                                                 }
                                                             } catch(e){}
                                                         };

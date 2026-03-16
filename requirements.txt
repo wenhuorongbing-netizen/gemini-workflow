@@ -9,3 +9,5 @@ pytest-asyncio
 watchdog==3.0.0
 apscheduler==3.10.4
 google-generativeai
+PyGithub
+python-dotenv
