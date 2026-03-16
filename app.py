@@ -523,7 +523,9 @@ async def api_devhouse_diff(compare_branch: str, base_branch: str = "main", targ
 async def api_devhouse_uat_response(request: Request):
     data = await request.json()
     approved = data.get("approved", False)
+    feedback = data.get("feedback", "")
     uat_decision["approved"] = approved
+    uat_decision["feedback"] = feedback
     uat_approval_event.set()
     return {"status": "success", "message": f"UAT Decision received: {'Approved' if approved else 'Rejected'}"}
 
@@ -891,6 +893,14 @@ async def run_devhouse_autopilot(task_id, initial_prompt, target_repo, kb_links,
             # Phase 2: Live Preview Engine & UAT Gate
             await devhouse_queue.put({"type": "info", "message": "[SYSTEM] Spinning up Live Preview Engine (npm run dev)..."})
             preview_process = None
+
+            # Kill any existing process on port 3005 before starting
+            try:
+                kill_proc = await asyncio.create_subprocess_shell("kill $(lsof -t -i:3005) 2>/dev/null || true")
+                await kill_proc.communicate()
+            except Exception as e:
+                logging.warning(f"Error attempting to kill port 3005: {e}")
+
             try:
                 preview_process = await asyncio.create_subprocess_exec(
                     "npm", "run", "dev", "--", "-p", "3005",
@@ -901,6 +911,15 @@ async def run_devhouse_autopilot(task_id, initial_prompt, target_repo, kb_links,
 
                 # Give the dev server a few seconds to bind
                 await asyncio.sleep(5)
+
+                # Set State to AWAITING_UAT
+                save_state(iteration, accumulated_context, 'AWAITING_UAT')
+                conn = sqlite3.connect(db_path)
+                cursor = conn.cursor()
+                cursor.execute("UPDATE DevHouseQueue SET status = 'AWAITING_UAT', updated_at = datetime('now') WHERE id = ?", (task_id,))
+                conn.commit()
+                conn.close()
+
                 await devhouse_queue.put({
                     "type": "preview",
                     "message": "Live Preview Ready. Awaiting UAT Approval...",
@@ -911,9 +930,18 @@ async def run_devhouse_autopilot(task_id, initial_prompt, target_repo, kb_links,
                 uat_approval_event.clear()
                 await uat_approval_event.wait()
 
+                # Update status back to running after human responds
+                save_state(iteration, accumulated_context, 'running')
+                conn = sqlite3.connect(db_path)
+                cursor = conn.cursor()
+                cursor.execute("UPDATE DevHouseQueue SET status = 'running', updated_at = datetime('now') WHERE id = ?", (task_id,))
+                conn.commit()
+                conn.close()
+
                 if not uat_decision.get("approved", False):
                      await devhouse_queue.put({"type": "error", "message": "[UAT] Human rejected changes. Resetting to Jules."})
-                     jules_instruction = f"[UAT ALERT] The human product manager REJECTED your latest changes in the UI preview. Fix the visual layout or feature based on the original request."
+                     user_feedback = uat_decision.get("feedback", "")
+                     jules_instruction = f"[UAT ALERT] The human product manager REJECTED your latest changes in the UI preview. Fix the visual layout or feature based on the original request.\n\nSpecific Human Feedback:\n{user_feedback}"
                      continue
 
                 await devhouse_queue.put({"type": "success", "message": "[UAT] Human approved changes. Proceeding to final Code Review."})
