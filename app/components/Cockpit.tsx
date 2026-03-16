@@ -22,6 +22,7 @@ export default function Cockpit() {
     const [isRadarActive, setIsRadarActive] = useState(false);
     const [previewUrl, setPreviewUrl] = useState<string | null>(null);
     const [isUatPending, setIsUatPending] = useState(false);
+    const [uatFeedback, setUatFeedback] = useState("");
 
     const [isMerging, setIsMerging] = useState(false);
 
@@ -127,14 +128,20 @@ export default function Cockpit() {
     };
 
     const handleUatDecision = async (approved: boolean) => {
+        if (!approved && !uatFeedback.trim()) {
+            alert("Please provide feedback for Jules on what needs to be fixed.");
+            return;
+        }
+
         try {
             await fetch("/api/devhouse/uat_response", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ approved })
+                body: JSON.stringify({ approved, feedback: uatFeedback })
             });
             setIsUatPending(false);
             setPreviewUrl(null);
+            setUatFeedback("");
         } catch(e) {
             console.error("Failed to send UAT response");
         }
@@ -300,26 +307,35 @@ export default function Cockpit() {
                                 <span className="animate-pulse w-3 h-3 bg-red-500 rounded-full inline-block"></span>
                                 UAT Live Preview Gate
                             </h2>
-                            <div className="flex gap-3">
-                                <button
-                                    onClick={() => handleUatDecision(false)}
-                                    className="bg-rose-600 hover:bg-rose-700 text-white font-bold py-1.5 px-4 rounded shadow text-sm transition-colors"
-                                >
-                                    Reject & Fix
-                                </button>
-                                <button
-                                    onClick={() => handleUatDecision(true)}
-                                    className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-1.5 px-4 rounded shadow text-sm transition-colors"
-                                >
-                                    Approve & Merge
-                                </button>
-                            </div>
                         </div>
                         <iframe
                             src={previewUrl}
-                            className="flex-1 w-full bg-white rounded shadow-inner"
+                            className="flex-1 w-full bg-white rounded shadow-inner mb-4 border border-slate-600"
                             title="Live Preview"
                         />
+                        <div className="flex flex-col gap-3 shrink-0 bg-slate-800 p-4 rounded border border-slate-700">
+                            <h3 className="text-white font-bold text-sm uppercase tracking-wider mb-1">Human Verdict</h3>
+                            <textarea
+                                value={uatFeedback}
+                                onChange={(e) => setUatFeedback(e.target.value)}
+                                placeholder="If rejecting, type your UI feedback here (e.g. 'The button is misaligned')..."
+                                className="w-full p-3 bg-slate-900 border border-slate-600 text-white rounded focus:ring-2 focus:ring-blue-500 focus:outline-none resize-none h-20 text-sm"
+                            />
+                            <div className="flex gap-4 mt-2">
+                                <button
+                                    onClick={() => handleUatDecision(false)}
+                                    className="flex-1 bg-rose-600 hover:bg-rose-700 text-white font-black py-4 px-6 rounded shadow-lg text-lg transition-colors border border-rose-500 -skew-x-12"
+                                >
+                                    <div className="skew-x-12">❌ Reject (Send Feedback)</div>
+                                </button>
+                                <button
+                                    onClick={() => handleUatDecision(true)}
+                                    className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white font-black py-4 px-6 rounded shadow-lg text-lg transition-colors border border-emerald-500 -skew-x-12"
+                                >
+                                    <div className="skew-x-12">✅ LGTM! Approve & Merge</div>
+                                </button>
+                            </div>
+                        </div>
                     </div>
                 )}
 
