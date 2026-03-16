@@ -393,67 +393,59 @@ class JulesBot:
                 logging.error(error_msg)
                 raise Exception(error_msg)
 
-    async def poll_for_completion(self, page: Page, stream_queue=None, step_id=None) -> str:
+    async def poll_for_completion(self, page: Page, stream_queue=None, step_id=None, interval_seconds=5) -> str:
         """
-        Polls the DOM dynamically for completion and extracts result.
+        Checks the DOM dynamically for completion and extracts result.
+        Now supports a configurable interval for the autopilot loop.
         """
         import json
         import asyncio
         from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
         async def emit(msg):
-            if stream_queue and step_id:
-                await stream_queue.put(f"data: {json.dumps({'step': step_id, 'status': 'Jules Working', 'message': f'[TELEMETRY] {msg}', 'screen': 'right'})}\n\n")
+            if hasattr(stream_queue, 'put'): # Handle different queue types
+                if hasattr(stream_queue, 'qsize'): # asyncio queue
+                    if step_id == "autopilot":
+                        await stream_queue.put({"type": "info", "message": msg})
+                    else:
+                        await stream_queue.put(f"data: {json.dumps({'step': step_id, 'status': 'Jules Working', 'message': f'[TELEMETRY] {msg}', 'screen': 'right'})}\n\n")
 
-        logging.info("Waiting for Jules to finish...")
-        await emit("Waiting for Jules to finish generation...")
-
-        max_polls = 120 # 10 minutes total waiting
-        poll_count = 0
-
-        while poll_count < max_polls:
-            poll_count += 1
-
+        try:
+            # Check for Ready for review indicator within the given interval
             try:
-                # Dynamic wait for 5 seconds per tick instead of hard sleep
+                await page.locator("text='Ready for review'").wait_for(state="visible", timeout=interval_seconds * 1000)
+
+                await emit("Detected 'Ready for review' text.")
+                logging.info("Jules reported 'Ready for review'.")
+
+                # Verify network is idle to ensure no lingering requests (Multi-Factor)
+                await emit("Waiting for network to become idle...")
                 try:
-                    # Multi-Factor trigger: check for Ready for review
-                    await page.locator("text='Ready for review'").wait_for(state="visible", timeout=5000)
-
-                    await emit("Detected 'Ready for review' text.")
-                    logging.info("Jules reported 'Ready for review'.")
-
-                    # Verify network is idle to ensure no lingering requests (Multi-Factor)
-                    await emit("Waiting for network to become idle...")
-                    try:
-                        await page.wait_for_load_state("networkidle", timeout=10000)
-                    except PlaywrightTimeoutError:
-                        await emit("Network idle timeout, proceeding with DOM extraction anyway...")
-
-                    body_text = await page.inner_text("body")
-                    # Extract branch link using regex
-                    import re
-                    match = re.search(r'(https://github\.com/\S+/tree/\S+)', body_text)
-                    if match:
-                        link = match.group(1)
-                        await emit(f"Extracted branch link: {link}")
-                        return f"Jules finished. Branch link: {link}"
-                    return "Jules finished successfully. Status: Ready for review."
+                    await page.wait_for_load_state("networkidle", timeout=10000)
                 except PlaywrightTimeoutError:
-                    if poll_count % 6 == 0: # Every 30 seconds
-                        await emit(f"Still waiting for completion... (Tick {poll_count}/{max_polls})")
-                    continue
+                    await emit("Network idle timeout, proceeding with DOM extraction anyway...")
 
-            except Exception as e:
-                if "Target closed" in str(e):
-                    error_msg = "[FATAL] Browser crashed due to memory. Attempting recovery..."
-                    await emit(error_msg)
-                    logging.error(error_msg)
-                    raise Exception("BROWSER_CRASH")
-                else:
-                    logging.debug(f"Error during Jules polling check: {e}")
+                body_text = await page.inner_text("body")
+                # Extract branch link using regex
+                import re
+                match = re.search(r'(https://github\.com/\S+/tree/\S+)', body_text)
+                if match:
+                    link = match.group(1)
+                    await emit(f"Extracted branch link: {link}")
+                    return f"Jules finished. Branch link: {link}"
+                return "Jules finished successfully. Status: Ready for review."
+            except PlaywrightTimeoutError:
+                 return "Still working..."
 
-        raise Exception("Timeout waiting for Jules to complete task.")
+        except Exception as e:
+            if "Target closed" in str(e):
+                error_msg = "[FATAL] Browser crashed due to memory. Attempting recovery..."
+                await emit(error_msg)
+                logging.error(error_msg)
+                raise Exception("BROWSER_CRASH")
+            else:
+                logging.debug(f"Error during Jules polling check: {e}")
+                return f"Error: {str(e)}"
 
     async def quit(self):
         """Closes the browser."""

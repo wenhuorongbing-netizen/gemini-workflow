@@ -27,6 +27,40 @@ export default function Cockpit() {
         scrollToBottom();
     }, [logs]);
 
+    useEffect(() => {
+        const eventSource = new EventSource('/api/devhouse/logs');
+        eventSource.onmessage = (e) => {
+            if(e.data === '"__DONE__"') {
+                 setIsStarting(false);
+                 return;
+            }
+            try {
+                const data = JSON.parse(e.data);
+                if (data.type) {
+                     setLogs(prev => [...prev, data]);
+                }
+
+                // Light state inference from logs (optional enhancement)
+                if (data.message && data.message.includes("Iteration")) {
+                    const match = data.message.match(/Iteration (\d+)\/(\d+)/);
+                    if (match) {
+                        setIteration(parseInt(match[1]));
+                    }
+                }
+                if (data.message && data.message.includes("branch 'devhouse-")) {
+                    const match = data.message.match(/branch '(devhouse-[^']+)'/);
+                    if (match) {
+                        setActiveBranch(match[1]);
+                    }
+                }
+            } catch(err) {
+                 console.error("SSE parse err", err, e.data);
+            }
+        };
+
+        return () => eventSource.close();
+    }, []);
+
     const addLog = (msg: string, type: "info"|"action"|"error"|"review" = "info") => {
         setLogs(prev => [...prev, { message: msg, type }]);
     };
@@ -37,7 +71,7 @@ export default function Cockpit() {
             return;
         }
         setIsStarting(true);
-        addLog("Initializing Auto-Dev protocol...", "info");
+        setLogs([]);
         try {
             const res = await fetch("/api/devhouse/start", {
                 method: "POST",
@@ -45,16 +79,12 @@ export default function Cockpit() {
                 body: JSON.stringify({ prompt, kbLinks, model })
             });
             const data = await res.json();
-            if (res.ok && data.status === "success") {
-                setActiveBranch(data.branch);
-                addLog(`Created new feature branch: ${data.branch}`, "action");
-                addLog(`Gemini PM is analyzing requirements using model ${model}...`, "info");
-            } else {
+            if (!res.ok || data.status !== "success") {
                 addLog(`Failed to start: ${data.error || data.message}`, "error");
+                setIsStarting(false);
             }
         } catch (error: any) {
             addLog(`Error connecting to backend: ${error.message}`, "error");
-        } finally {
             setIsStarting(false);
         }
     };

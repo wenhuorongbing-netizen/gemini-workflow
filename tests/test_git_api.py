@@ -22,10 +22,8 @@ def test_get_devhouse_diff(mock_get_branch_diff):
     assert "File: main.py" in data["diff"]
     mock_get_branch_diff.assert_called_once_with("main", "feature-branch")
 
-@patch('app.create_feature_branch')
-def test_post_devhouse_start(mock_create_feature_branch):
-    mock_create_feature_branch.return_value = "devhouse-test-123"
-
+@patch('app.run_devhouse_autopilot')
+def test_post_devhouse_start(mock_run_autopilot):
     payload = {
         "prompt": "Build a new header component.",
         "kbLinks": "https://docs.github.com",
@@ -37,8 +35,6 @@ def test_post_devhouse_start(mock_create_feature_branch):
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == "success"
-    assert data["branch"] == "devhouse-test-123"
-    assert mock_create_feature_branch.called
 
 @patch('app.merge_and_delete_branch')
 def test_post_devhouse_merge(mock_merge_and_delete_branch):
@@ -75,9 +71,10 @@ def test_auth_exception_handling(mock_get_github_repo):
     mock_get_github_repo.side_effect = app.AuthException("Please add a valid GITHUB_TOKEN to your .env file")
 
     payload = {
-        "prompt": "Test auth",
+        "head_branch": "feature",
+        "base_branch": "main"
     }
-    response = client.post("/api/devhouse/start", json=payload)
+    response = client.post("/api/devhouse/merge", json=payload)
 
     assert response.status_code == 401
     data = response.json()

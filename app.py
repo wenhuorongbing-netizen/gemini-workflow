@@ -537,21 +537,202 @@ async def api_devhouse_review(request: Request):
     except Exception as e:
         return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
 
+devhouse_lock = asyncio.Lock()
+devhouse_queue = asyncio.Queue()
+
+async def run_devhouse_autopilot(initial_prompt, kb_links, model_type, max_iterations=5):
+    import datetime
+    import time
+    import google.generativeai as genai
+    import bot
+
+    branch_name = f"devhouse-{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}"
+    jules_bot = None
+    jules_page = None
+
+    try:
+        await devhouse_queue.put({"type": "info", "message": f"[PM] Analyzing requirements for Auto-Dev loop..."})
+
+        await devhouse_queue.put({"type": "action", "message": f"[DEV] Spawning Jules..."})
+
+        jules_bot = bot.JulesBot(profile_id="1")
+        jules_page = await jules_bot.create_new_page()
+
+        # Prepare the first instruction for Jules
+        jules_instruction = f"Task: {initial_prompt}\nKnowledge Base: {kb_links}\nBranch: {branch_name}"
+
+        accumulated_context = jules_instruction
+        import sqlite3
+        import os
+
+        def save_state(count, ctx, status):
+            try:
+                db_path = os.path.join(os.path.dirname(__file__), 'dev.db')
+                conn = sqlite3.connect(db_path)
+                cursor = conn.cursor()
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS DevHouseState (
+                        id TEXT PRIMARY KEY,
+                        branch TEXT,
+                        iteration INTEGER,
+                        max_iterations INTEGER,
+                        accumulated_context TEXT,
+                        status TEXT,
+                        updatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                cursor.execute("""
+                    INSERT OR REPLACE INTO DevHouseState (id, branch, iteration, max_iterations, accumulated_context, status, updatedAt)
+                    VALUES ('active', ?, ?, ?, ?, ?, datetime('now'))
+                """, (branch_name, count, max_iterations, ctx, status))
+                conn.commit()
+                conn.close()
+            except Exception as e:
+                logging.error(f"Failed to save DevHouse state: {e}")
+
+        # Check if we should resume
+        try:
+             db_path = os.path.join(os.path.dirname(__file__), 'dev.db')
+             conn = sqlite3.connect(db_path)
+             cursor = conn.cursor()
+             # We just query, if table doesn't exist, we skip resume
+             cursor.execute("SELECT branch, iteration, max_iterations, accumulated_context, status FROM DevHouseState WHERE id = 'active'")
+             row = cursor.fetchone()
+             if row and row[4] == 'running':
+                 branch_name = row[0]
+                 start_iteration = row[1]
+                 max_iterations = row[2]
+                 accumulated_context = row[3]
+                 await devhouse_queue.put({"type": "info", "message": f"[PM] Resuming DevHouse run from DB state on iteration {start_iteration}..."})
+
+                 # Restore jules_instruction from accumulated context (the last block of text is the latest instruction)
+                 jules_instruction = f"Task: {initial_prompt}\nKnowledge Base: {kb_links}\nBranch: {branch_name}\n\nResuming previous instruction set from crashed state."
+                 if "Review (Iter" in accumulated_context:
+                      parts = accumulated_context.split("Review (Iter")
+                      latest_review = parts[-1]
+                      jules_instruction = f"Code Review Feedback:\n{latest_review}\n\nPlease fix these issues."
+             else:
+                 start_iteration = 1
+                 create_feature_branch("main", branch_name)
+                 save_state(1, accumulated_context, 'running')
+             conn.close()
+        except sqlite3.OperationalError:
+             start_iteration = 1
+             create_feature_branch("main", branch_name)
+             save_state(1, accumulated_context, 'running')
+
+        for iteration in range(start_iteration, max_iterations + 1):
+            await devhouse_queue.put({"type": "info", "message": f"[DEV] Iteration {iteration}/{max_iterations}: Sending instructions to Jules..."})
+            save_state(iteration, accumulated_context, 'running')
+
+            # Step A: Send task to Jules
+            await jules_bot.send_task(jules_page, "https://jules.dev", jules_instruction)
+
+            # Step B: Wait for Jules to finish
+            await devhouse_queue.put({"type": "info", "message": f"[DEV] Iteration {iteration}/{max_iterations}: Writing code... Waiting for 'Ready for Review'."})
+
+            # 30-second monitoring loop
+            jules_status = ""
+            max_polls = 60 # 60 * 30s = 30 mins
+            for poll in range(max_polls):
+                status_res = await jules_bot.poll_for_completion(jules_page, stream_queue=devhouse_queue, step_id="autopilot", interval_seconds=30)
+                if "Ready for review" in status_res or "Jules finished" in status_res:
+                     jules_status = status_res
+                     break
+                await asyncio.sleep(30)
+
+            if not jules_status:
+                raise Exception("Timeout waiting for Jules to finish task.")
+
+            await devhouse_queue.put({"type": "action", "message": f"[GIT] Code pushed by Jules. Fetching diff for branch '{branch_name}'..."})
+
+            # Step C: Get Diff
+            diff = get_branch_diff("main", branch_name)
+
+            if not diff.strip():
+                await devhouse_queue.put({"type": "info", "message": f"[PM] No changes detected in diff. Jules might have failed."})
+                break
+
+            # Step D: Gemini Code Review
+            await devhouse_queue.put({"type": "action", "message": f"[PM] Reviewing Diff: Analyzing code changes..."})
+
+            gemini_api_key = os.environ.get("GEMINI_API_KEY")
+            if not gemini_api_key:
+                raise Exception("GEMINI_API_KEY is not set.")
+
+            genai.configure(api_key=gemini_api_key)
+            model = genai.GenerativeModel('gemini-1.5-pro') if model_type == "Pro" else genai.GenerativeModel('gemini-1.5-flash')
+
+            review_prompt = f"You are the Lead Technical PM. Review this code diff. If the code looks perfect and meets the goal without regressions, output exactly 'LGTM'. Otherwise, provide specific feedback to the developer on what to fix. Diff:\n{diff}\n\nAccumulated Context:\n{accumulated_context}"
+            response = model.generate_content(review_prompt)
+            review_text = response.text
+
+            accumulated_context += f"\n\nReview (Iter {iteration}):\n{review_text}"
+
+            if "LGTM" in review_text.strip():
+                await devhouse_queue.put({"type": "review", "message": f"[PM] Review complete: LGTM. Proceeding to merge."})
+                break
+
+            await devhouse_queue.put({"type": "review", "message": f"[PM] Reviewing Diff: Found issues. Sending feedback back:\n{review_text}"})
+
+            # Step E: Feed feedback back to Jules
+            jules_instruction = f"Code Review Feedback:\n{review_text}\n\nPlease fix these issues."
+
+        # End of Loop - Auto-Merge
+        await devhouse_queue.put({"type": "action", "message": f"[GIT] DevHouse loop finished. Merging branch '{branch_name}' and cleaning up."})
+        save_state(max_iterations, accumulated_context, 'merging')
+        merge_and_delete_branch(branch_name, "main")
+        save_state(max_iterations, accumulated_context, 'finished')
+
+        await devhouse_queue.put({"type": "info", "message": f"[SYSTEM] Merge complete. DevHouse Autopilot cycle finished."})
+
+    except Exception as e:
+        save_state(1, str(e), 'failed')
+        await devhouse_queue.put({"type": "error", "message": f"[ERROR] DevHouse Autopilot crashed: {str(e)}"})
+    finally:
+        if jules_bot:
+            await jules_bot.quit()
+
 @app.post("/api/devhouse/start")
-async def api_devhouse_start(request: Request):
+async def api_devhouse_start(request: Request, background_tasks: BackgroundTasks):
+    if devhouse_lock.locked():
+         return JSONResponse({"status": "error", "message": "A DevHouse Autopilot loop is already running."}, status_code=409)
+
     data = await request.json()
     prompt = data.get("prompt")
+    kb_links = data.get("kbLinks", "")
+    model = data.get("model", "Pro")
+
     if not prompt:
         return JSONResponse({"status": "error", "message": "prompt is required"}, status_code=400)
-    import datetime
-    new_branch_name = f"devhouse-{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}"
-    try:
-        branch = create_feature_branch("main", new_branch_name)
-        return {"status": "success", "branch": branch, "message": "Started Auto-Dev loop on new branch."}
-    except AuthException as e:
-        return JSONResponse({"error": str(e)}, status_code=401)
-    except Exception as e:
-        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+
+    async def task_wrapper():
+        async with devhouse_lock:
+            # Clear old queue messages before starting
+            while not devhouse_queue.empty():
+                 try:
+                     devhouse_queue.get_nowait()
+                 except asyncio.QueueEmpty:
+                     break
+            await run_devhouse_autopilot(prompt, kb_links, model)
+            await devhouse_queue.put("__DONE__")
+
+    background_tasks.add_task(task_wrapper)
+    return {"status": "success", "message": "Started Auto-Dev loop in the background."}
+
+@app.get("/api/devhouse/logs")
+async def stream_devhouse_logs():
+    async def log_generator():
+        try:
+            while True:
+                event = await devhouse_queue.get()
+                if event == "__DONE__":
+                    break
+                yield f"data: {json.dumps(event)}\n\n"
+        except Exception:
+            pass
+
+    return StreamingResponse(log_generator(), media_type="text/event-stream")
 
 @app.get("/")
 async def index(request: Request):
