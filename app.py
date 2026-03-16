@@ -580,6 +580,30 @@ def init_devhouse_queue_db():
 
 init_devhouse_queue_db()
 
+def scan_repo_structure(sandbox_path):
+    import os
+
+    file_tree = []
+    valid_extensions = {'.py', '.ts', '.tsx', '.js'}
+    ignored_dirs = {'node_modules', '.git', '__pycache__', '.next', 'build', 'dist', 'out'}
+
+    for root, dirs, files in os.walk(sandbox_path):
+        dirs[:] = [d for d in dirs if d not in ignored_dirs and not d.startswith('.')]
+        level = root.replace(sandbox_path, '').count(os.sep)
+        indent = ' ' * 4 * (level)
+        if root != sandbox_path:
+            file_tree.append(f"{indent}{os.path.basename(root)}/")
+
+        subindent = ' ' * 4 * (level + 1)
+        for f in files:
+            if os.path.splitext(f)[1] in valid_extensions:
+                file_tree.append(f"{subindent}{f}")
+
+    if not file_tree:
+        return "No relevant files found."
+
+    return "\n".join(file_tree)
+
 def index_repository(repo_path, prompt):
     import os
     from rank_bm25 import BM25Okapi
@@ -663,6 +687,10 @@ async def run_devhouse_autopilot(task_id, initial_prompt, target_repo, kb_links,
 
         await devhouse_queue.put({"type": "info", "message": f"[SYSTEM] Indexing repository for Codebase RAG..."})
         radar_report = index_repository(workspace_dir, initial_prompt)
+
+        # Phase 4: File tree scan
+        repo_structure = scan_repo_structure(workspace_dir)
+
         await devhouse_queue.put({"type": "radar", "message": f"Radar mapped {workspace_dir}"})
 
         await devhouse_queue.put({"type": "action", "message": f"[DEV] Spawning Jules..."})
@@ -671,7 +699,7 @@ async def run_devhouse_autopilot(task_id, initial_prompt, target_repo, kb_links,
         jules_page = await jules_bot.create_new_page()
 
         # Prepare the first instruction for Jules
-        jules_instruction = f"Task: {initial_prompt}\nKnowledge Base: {kb_links}\nBranch: {branch_name}\n\n{radar_report}\n\nIMPORTANT MANDATE: You are operating in a sandbox. The target codebase is located exclusively at: `{workspace_dir}`. All bash commands, file modifications, and git operations MUST be executed within `{workspace_dir}`. Do NOT edit the local engine files."
+        jules_instruction = f"Task: {initial_prompt}\nKnowledge Base: {kb_links}\nBranch: {branch_name}\n\n--- REPO STRUCTURE ---\n{repo_structure}\n\n{radar_report}\n\nIMPORTANT MANDATE: You are operating in a sandbox. The target codebase is located exclusively at: `{workspace_dir}`. All bash commands, file modifications, and git operations MUST be executed within `{workspace_dir}`. Do NOT edit the local engine files."
 
         accumulated_context = jules_instruction
         import sqlite3
