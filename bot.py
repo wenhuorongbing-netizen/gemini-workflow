@@ -279,10 +279,12 @@ class GeminiBot:
 
     async def quit(self):
         """Closes the browser."""
-        if self.context:
-            await self.context.close()
-        if self.playwright:
-            await self.playwright.stop()
+        try:
+            if self.context:
+                await self.context.close()
+        finally:
+            if self.playwright:
+                await self.playwright.stop()
         logging.info("Browser closed.")
 
 
@@ -455,8 +457,10 @@ class JulesBot:
 
     async def quit(self):
         """Closes the browser."""
-        if self.context:
-            await self.context.close()
-        if self.playwright:
-            await self.playwright.stop()
+        try:
+            if self.context:
+                await self.context.close()
+        finally:
+            if self.playwright:
+                await self.playwright.stop()
         logging.info("JulesBot Browser closed.")

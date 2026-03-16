@@ -966,13 +966,14 @@ async def run_workflow_engine(steps, workspace_id, stream_queue=None, profile_id
                 import httpx
                 try:
                     payload = json.loads(final_payload_str)
-                    async with httpx.AsyncClient() as client:
-                        resp = await client.post(webhook_url, json=payload, timeout=10.0)
+                    async with httpx.AsyncClient(timeout=10.0) as client:
+                        resp = await client.post(webhook_url, json=payload)
                         resp.raise_for_status()
                         results[str(step_id)] = f"Webhook success: {resp.status_code}\n{resp.text}"
                         if stream_queue: yield f"data: {{json.dumps({{'step': step_id, 'status': 'Complete', 'result': results[str(step_id)], 'show_result': show_result}})}}\n\n"
                 except httpx.TimeoutException:
-                    results[str(step_id)] = f"[WEBHOOK FAILED] Request timed out after 10 seconds."
+                    logging.warning(f"[WARN] Webhook Timeout: {webhook_url}")
+                    results[str(step_id)] = f"[WARN] Webhook Timeout: Request timed out after 10 seconds."
                     if stream_queue: yield f"data: {{json.dumps({{'step': step_id, 'status': 'Error', 'result': results[str(step_id)]}})}}\n\n"
                 except Exception as e:
                     results[str(step_id)] = f"[WEBHOOK FAILED] {str(e)}"
@@ -1030,12 +1031,14 @@ async def run_workflow_engine(steps, workspace_id, stream_queue=None, profile_id
 
                 if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Processing Batch', 'message': f'Processing {len(items)} items concurrently...'})}\n\n"
 
+                # Enforce strict concurrent limits (max 3) for batch execution to avoid spawning 100 browsers at once
                 concurrent_semaphore = asyncio.Semaphore(3)
 
                 async def process_item(item, item_index):
                     item_page = None
+                    # Wait outside the try/finally so we don't accidentally close an un-acquired lock/unspawned page
+                    await concurrent_semaphore.acquire()
                     try:
-                        await concurrent_semaphore.acquire()
                         if cancel_event and cancel_event.is_set():
                             return f"[Item {item_index + 1} CANCELED]"
 
@@ -1124,8 +1127,11 @@ async def run_workflow_engine(steps, workspace_id, stream_queue=None, profile_id
                                 break
                     pump_task = asyncio.create_task(pump_queue())
 
-                batch_results = await asyncio.gather(*tasks)
-                if pump_task: pump_task.cancel()
+                # Explicitly wrap gather to ensure we run parallel safe.
+                try:
+                    batch_results = await asyncio.gather(*tasks)
+                finally:
+                    if pump_task: pump_task.cancel()
 
                 final_result_text = "\n\n--- \n\n".join(batch_results)
                 results[str(step_id)] = final_result_text
@@ -1252,12 +1258,14 @@ async def run_workflow_engine(steps, workspace_id, stream_queue=None, profile_id
 
                     if is_chunked:
                         # Process chunks concurrently using the same pattern as batch map-reduce
+                        # Enforce strict concurrent limits for auto-chunking (max 3)
                         concurrent_semaphore = asyncio.Semaphore(3)
 
                         async def process_chunk(chunk_text, chunk_index):
                             chunk_page = None
+                            # Acquire semaphore first, so we don't spam 100 page creations
+                            await concurrent_semaphore.acquire()
                             try:
-                                await concurrent_semaphore.acquire()
                                 if cancel_event and cancel_event.is_set():
                                     return f"[Chunk {chunk_index + 1} CANCELED]"
 
@@ -1330,8 +1338,10 @@ async def run_workflow_engine(steps, workspace_id, stream_queue=None, profile_id
                                         break
                             pump_task = asyncio.create_task(pump_queue())
 
-                        chunk_results = await asyncio.gather(*chunk_tasks)
-                        if pump_task: pump_task.cancel()
+                        try:
+                            chunk_results = await asyncio.gather(*chunk_tasks)
+                        finally:
+                            if pump_task: pump_task.cancel()
 
                         final_result_text = "\n\n--- [Auto-Chunk Break] ---\n\n".join(chunk_results)
                         results[str(step_id)] = final_result_text
@@ -1514,9 +1524,13 @@ async def execute_workflow(request: Request):
                 else:
                     cursor.execute("UPDATE User SET tokens_balance = tokens_balance - 1 WHERE id = ?", (user_id,))
                     conn.commit()
+            else:
+                conn.close()
+                return JSONResponse({"error": "[SYSTEM_ERROR] User not found."}, status_code=403)
             conn.close()
         except Exception as e:
             logging.error(f"Quota check failed: {e}")
+            return JSONResponse({"error": "[SYSTEM_ERROR] 余额校验失败 (Quota validation failed). 请稍后再试。"}, status_code=500)
     # ------------------------
 
     if not steps:
