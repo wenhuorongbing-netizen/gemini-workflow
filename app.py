@@ -605,6 +605,15 @@ def init_devhouse_queue_db():
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS CorporateMemory (
+            id TEXT PRIMARY KEY,
+            category TEXT,
+            error_pattern TEXT,
+            solution TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
     conn.commit()
     conn.close()
 
@@ -685,6 +694,11 @@ async def run_devhouse_autopilot(task_id, initial_prompt, target_repo, kb_links,
     import bot
     import os
     import subprocess
+    from agents import PMAgent, DevAgent, QAAgent, SecOpsAgent
+
+    pm_tokens_burned = 0
+    dev_tokens_burned = 0
+    iteration = 0
 
     branch_name = f"devhouse-{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}"
     jules_bot = None
@@ -723,13 +737,43 @@ async def run_devhouse_autopilot(task_id, initial_prompt, target_repo, kb_links,
 
         await devhouse_queue.put({"type": "radar", "message": f"Radar mapped {workspace_dir}"})
 
+        await devhouse_queue.put({"type": "action", "message": f"[PM] Generating initial technical spec..."})
+        pm_agent = PMAgent(model_type)
+        qa_agent = QAAgent(pm_agent.get_model())
+        secops_agent = SecOpsAgent(pm_agent.get_model())
+
+        import sqlite3
+        import os
+        db_path = os.path.join(os.path.dirname(__file__), 'dev.db')
+
+        # Load Corporate Memory
+        corporate_memory_context = ""
+        try:
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+            cursor.execute("SELECT category, error_pattern, solution FROM CorporateMemory ORDER BY created_at DESC LIMIT 5")
+            memories = cursor.fetchall()
+            conn.close()
+            if memories:
+                memory_lines = []
+                for idx, mem in enumerate(memories):
+                    memory_lines.append(f"Memory {idx+1} ({mem[0]}):\nPattern to Avoid: {mem[1]}\nSolution: {mem[2]}\n")
+                corporate_memory_context = "\n".join(memory_lines)
+                await devhouse_queue.put({"type": "info", "message": f"[MEMORY] Loaded {len(memories)} recent Corporate Memories to avoid past mistakes."})
+        except Exception as e:
+            logging.warning(f"Failed to load corporate memory: {e}")
+
+        initial_spec, spec_tokens = pm_agent.generate_initial_spec(initial_prompt, radar_report, kb_links, corporate_memory=corporate_memory_context)
+        pm_tokens_burned += spec_tokens
+
         await devhouse_queue.put({"type": "action", "message": f"[DEV] Spawning Jules..."})
 
         jules_bot = bot.JulesBot(profile_id="1")
         jules_page = await jules_bot.create_new_page()
+        dev_agent = DevAgent(jules_bot, jules_page)
 
         # Prepare the first instruction for Jules
-        jules_instruction = f"Task: {initial_prompt}\nKnowledge Base: {kb_links}\nBranch: {branch_name}\n\n--- REPO STRUCTURE ---\n{repo_structure}\n\n{radar_report}\n\nIMPORTANT MANDATE: You are operating in a sandbox. The target codebase is located exclusively at: `{workspace_dir}`. All bash commands, file modifications, and git operations MUST be executed within `{workspace_dir}`. Do NOT edit the local engine files."
+        jules_instruction = f"Technical Spec: {initial_spec}\nKnowledge Base: {kb_links}\nBranch: {branch_name}\n\n--- REPO STRUCTURE ---\n{repo_structure}\n\n{radar_report}\n\nIMPORTANT MANDATE: You are operating in a sandbox. The target codebase is located exclusively at: `{workspace_dir}`. All bash commands, file modifications, and git operations MUST be executed within `{workspace_dir}`. Do NOT edit the local engine files."
 
         accumulated_context = jules_instruction
         import sqlite3
@@ -785,21 +829,9 @@ async def run_devhouse_autopilot(task_id, initial_prompt, target_repo, kb_links,
 
             # 15-Minute Watchdog Wrappers
             try:
-                # Step A: Send task to Jules
-                await asyncio.wait_for(jules_bot.send_task(jules_page, "https://jules.dev", jules_instruction), timeout=900)
-
-                # Step B: Wait for Jules to finish
+                # Step A & B: Send task to Jules and wait
                 await devhouse_queue.put({"type": "info", "message": f"[DEV] Iteration {iteration}/{max_iterations}: Writing code... Waiting for 'Ready for Review'."})
-
-                # 30-second monitoring loop
-                jules_status = ""
-                max_polls = 60 # 60 * 30s = 30 mins
-                for poll in range(max_polls):
-                    status_res = await asyncio.wait_for(jules_bot.poll_for_completion(jules_page, stream_queue=devhouse_queue, step_id="autopilot", interval_seconds=30), timeout=900)
-                    if "Ready for review" in status_res or "Jules finished" in status_res:
-                         jules_status = status_res
-                         break
-                    await asyncio.sleep(30)
+                jules_status = await asyncio.wait_for(dev_agent.execute_task(jules_instruction), timeout=900)
 
                 if not jules_status:
                     raise Exception("Timeout waiting for Jules to finish task.")
@@ -810,6 +842,7 @@ async def run_devhouse_autopilot(task_id, initial_prompt, target_repo, kb_links,
                 await jules_bot.quit()
                 jules_bot = bot.JulesBot(profile_id="1")
                 jules_page = await jules_bot.create_new_page()
+                dev_agent = DevAgent(jules_bot, jules_page)
                 continue # Retry this iteration
 
             await devhouse_queue.put({"type": "action", "message": f"[GIT] Code pushed by Jules. Fetching diff for branch '{branch_name}'..."})
@@ -896,59 +929,81 @@ async def run_devhouse_autopilot(task_id, initial_prompt, target_repo, kb_links,
             try:
                 # 1. SecOps Agent Review
                 await devhouse_queue.put({"type": "info", "message": f"[SECOPS] 🛡️ SecOps Agent analyzing diff for vulnerabilities..."})
-                secops_prompt = f"You are a strict SecOps Engineer. Analyze this code diff for hardcoded secrets, SQL injection, XSS, or OWASP top 10 vulnerabilities.\nIf you find ANY security risk, explain it. If the code is safe, reply exactly with 'APPROVED'.\n\nDiff:\n{latest_diff}"
-                secops_response = pm_model.generate_content(secops_prompt)
 
-                if hasattr(secops_response, 'usage_metadata'):
-                    pm_tokens_burned += secops_response.usage_metadata.total_token_count
+                secops_text, sec_tokens = secops_agent.analyze_diff(latest_diff)
+                pm_tokens_burned += sec_tokens
 
-                secops_text = secops_response.text.strip()
                 if "APPROVED" not in secops_text.upper():
                     await devhouse_queue.put({"type": "error", "message": f"[SECOPS] 🛑 Security Violation Detected:\n{secops_text}"})
                     jules_instruction = f"[SECOPS REJECTION] Fix the following security vulnerabilities immediately:\n{secops_text}"
+
+                    # Store Corporate Memory
+                    import uuid
+                    try:
+                        conn = sqlite3.connect(db_path)
+                        c = conn.cursor()
+                        c.execute("INSERT INTO CorporateMemory (id, category, error_pattern, solution) VALUES (?, ?, ?, ?)",
+                                  (f"mem-{uuid.uuid4().hex[:8]}", "SECOPS", "Security Vulnerability detected in code diff", secops_text))
+                        conn.commit()
+                        conn.close()
+                    except Exception as e:
+                        logging.warning(f"Failed to store SECOPS memory: {e}")
+
                     continue
 
                 await devhouse_queue.put({"type": "ci_success", "message": "[SECOPS] ✅ Security check passed."})
 
                 # 2. QA Agent Review & TDD Test Generation
                 await devhouse_queue.put({"type": "info", "message": f"[QA] 🧪 QA Agent generating TDD test cases..."})
-                qa_prompt = f"You are a strict QA Test Engineer. Review this code diff. Write a simple functional frontend or API test script using `pytest` or `vitest` that targets the new feature. Return ONLY the script inside a ```python or ```javascript markdown block.\n\nDiff:\n{latest_diff}"
-                qa_response = pm_model.generate_content(qa_prompt)
 
-                if hasattr(qa_response, 'usage_metadata'):
-                    pm_tokens_burned += qa_response.usage_metadata.total_token_count
+                test_script_content, qa_tokens = qa_agent.generate_tests(latest_diff)
+                pm_tokens_burned += qa_tokens
 
-                qa_text = qa_response.text
-                import re
-                code_blocks = re.findall(r'```(?:python|javascript|js|typescript|ts)?\n(.*?)\n```', qa_text, re.DOTALL)
-
-                if code_blocks:
-                    test_script_content = code_blocks[0]
+                if test_script_content:
                     test_file_path = os.path.join(workspace_dir, "devhouse_swarm_test.spec.js") # For NPM run test compliance
                     with open(test_file_path, "w") as f:
                         f.write(test_script_content)
 
                     await devhouse_queue.put({"type": "info", "message": f"[QA] ⚙️ Running generated TDD tests..."})
 
-                    test_proc = await asyncio.create_subprocess_exec(
-                        "npm", "run", "test",
-                        cwd=workspace_dir,
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE
-                    )
-
                     try:
+                        test_proc = await asyncio.create_subprocess_exec(
+                            "npm", "run", "test",
+                            cwd=workspace_dir,
+                            env={"PATH": os.environ.get("PATH", "")}, # Secure Enclave: Strip all other host env variables
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.PIPE
+                        )
                         test_stdout, test_stderr = await asyncio.wait_for(test_proc.communicate(), timeout=60.0)
                     except asyncio.TimeoutError:
                         test_proc.kill()
-                        await devhouse_queue.put({"type": "error", "message": f"[QA] 🛑 TDD Gate Failed: Timeout running tests."})
-                        jules_instruction = f"[QA REJECTION] Fix the code. The QA test timed out."
-                        continue
+                        error_msg = "[SECURITY ALERT] Code execution breached sandbox constraints (Timeout)."
+                        logging.error(error_msg)
+                        await devhouse_queue.put({"type": "error", "message": f"[QA] 🛑 {error_msg}"})
+                        raise Exception(error_msg)
+                    except PermissionError as e:
+                        error_msg = f"[SECURITY ALERT] Code execution breached sandbox constraints (PermissionError): {e}"
+                        logging.error(error_msg)
+                        await devhouse_queue.put({"type": "error", "message": f"[QA] 🛑 {error_msg}"})
+                        raise Exception(error_msg)
 
                     if test_proc.returncode != 0:
                         test_error = test_stderr.decode('utf-8') or test_stdout.decode('utf-8')
                         await devhouse_queue.put({"type": "error", "message": f"[QA] 🛑 TDD Gate Failed:\n{test_error}"})
                         jules_instruction = f"[QA REJECTION] Fix the code so it passes the QA test. Here is the failing test error:\n{test_error}"
+
+                        # Store Corporate Memory
+                        import uuid
+                        try:
+                            conn = sqlite3.connect(db_path)
+                            c = conn.cursor()
+                            c.execute("INSERT INTO CorporateMemory (id, category, error_pattern, solution) VALUES (?, ?, ?, ?)",
+                                      (f"mem-{uuid.uuid4().hex[:8]}", "QA", "TDD Test Failure", test_error))
+                            conn.commit()
+                            conn.close()
+                        except Exception as e:
+                            logging.warning(f"Failed to store QA memory: {e}")
+
                         continue
 
                     await devhouse_queue.put({"type": "ci_success", "message": "[QA] ✅ TDD tests passed!"})
@@ -1025,16 +1080,8 @@ async def run_devhouse_autopilot(task_id, initial_prompt, target_repo, kb_links,
             # Step D: Gemini Code Review
             await devhouse_queue.put({"type": "action", "message": f"[PM] Reviewing Diff: Analyzing code changes..."})
 
-            gemini_api_key = os.environ.get("GEMINI_API_KEY")
-            if not gemini_api_key:
-                raise Exception("GEMINI_API_KEY is not set.")
-
-            genai.configure(api_key=gemini_api_key)
-            model = genai.GenerativeModel('gemini-1.5-pro') if model_type == "Pro" else genai.GenerativeModel('gemini-1.5-flash')
-
-            review_prompt = f"You are the Lead Technical PM. Review this code diff. If the code looks perfect and meets the goal without regressions, output exactly 'LGTM'. Otherwise, provide specific feedback to the developer on what to fix. Diff:\n{diff}\n\nAccumulated Context:\n{accumulated_context}"
-            response = model.generate_content(review_prompt)
-            review_text = response.text
+            review_text, review_tokens = pm_agent.review_diff(latest_diff, accumulated_context)
+            pm_tokens_burned += review_tokens
 
             accumulated_context += f"\n\nReview (Iter {iteration}):\n{review_text}"
 

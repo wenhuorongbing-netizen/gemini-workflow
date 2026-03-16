@@ -56,3 +56,11 @@ model RunHistory {
   edges        String?
   createdAt    DateTime @default(now())
 }
+
+model CorporateMemory {
+  id            String   @id @default(cuid())
+  category      String   // "QA", "SECOPS", etc.
+  error_pattern String
+  solution      String
+  createdAt     DateTime @default(now())
+}
