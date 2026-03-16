@@ -580,6 +580,50 @@ def init_devhouse_queue_db():
 
 init_devhouse_queue_db()
 
+def index_repository(repo_path, prompt):
+    import os
+    from rank_bm25 import BM25Okapi
+
+    docs = []
+    file_paths = []
+
+    valid_extensions = {'.py', '.ts', '.tsx', '.js'}
+    ignored_dirs = {'node_modules', '.git', '__pycache__', '.next', 'build', 'dist', 'out'}
+
+    for root, dirs, files in os.walk(repo_path):
+        dirs[:] = [d for d in dirs if d not in ignored_dirs and not d.startswith('.')]
+        for file in files:
+            ext = os.path.splitext(file)[1]
+            if ext in valid_extensions:
+                filepath = os.path.join(root, file)
+                try:
+                    with open(filepath, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                        # Simple chunking by file for now
+                        docs.append(content)
+                        file_paths.append(filepath.replace(repo_path, '').lstrip('/'))
+                except Exception:
+                    pass
+
+    if not docs:
+        return "No relevant source files found."
+
+    tokenized_docs = [doc.split(" ") for doc in docs]
+    bm25 = BM25Okapi(tokenized_docs)
+
+    tokenized_query = prompt.split(" ")
+
+    top_n = min(5, len(docs))
+    top_docs = bm25.get_top_n(tokenized_query, docs, n=top_n)
+
+    radar_report = "--- RADAR REPORT: TOP RELEVANT FILES ---\n\n"
+    for i, doc in enumerate(top_docs):
+        # find original filepath
+        idx = docs.index(doc)
+        radar_report += f"File: {file_paths[idx]}\nSnippet (first 500 chars):\n{doc[:500]}...\n\n"
+
+    return radar_report
+
 async def run_devhouse_autopilot(task_id, initial_prompt, target_repo, kb_links, model_type, max_iterations=5):
     import datetime
     import time
@@ -617,13 +661,17 @@ async def run_devhouse_autopilot(task_id, initial_prompt, target_repo, kb_links,
             stderr_masked = e.stderr.replace(git_token, "[REDACTED_TOKEN]") if e.stderr and git_token else e.stderr
             raise Exception(f"Failed to clone repository: {error_msg}. Stderr: {stderr_masked}")
 
+        await devhouse_queue.put({"type": "info", "message": f"[SYSTEM] Indexing repository for Codebase RAG..."})
+        radar_report = index_repository(workspace_dir, initial_prompt)
+        await devhouse_queue.put({"type": "radar", "message": f"Radar mapped {workspace_dir}"})
+
         await devhouse_queue.put({"type": "action", "message": f"[DEV] Spawning Jules..."})
 
         jules_bot = bot.JulesBot(profile_id="1")
         jules_page = await jules_bot.create_new_page()
 
         # Prepare the first instruction for Jules
-        jules_instruction = f"Task: {initial_prompt}\nKnowledge Base: {kb_links}\nBranch: {branch_name}\n\nIMPORTANT MANDATE: You are operating in a sandbox. The target codebase is located exclusively at: `{workspace_dir}`. All bash commands, file modifications, and git operations MUST be executed within `{workspace_dir}`. Do NOT edit the local engine files."
+        jules_instruction = f"Task: {initial_prompt}\nKnowledge Base: {kb_links}\nBranch: {branch_name}\n\n{radar_report}\n\nIMPORTANT MANDATE: You are operating in a sandbox. The target codebase is located exclusively at: `{workspace_dir}`. All bash commands, file modifications, and git operations MUST be executed within `{workspace_dir}`. Do NOT edit the local engine files."
 
         accumulated_context = jules_instruction
         import sqlite3
@@ -665,6 +713,15 @@ async def run_devhouse_autopilot(task_id, initial_prompt, target_repo, kb_links,
         fix_count = 0
 
         while iteration <= max_iterations:
+            # Phase 3: Git Time-Machine - Tag safe commit before Jules acts
+            try:
+                # Get the current commit hash
+                hash_proc = subprocess.run(["git", "rev-parse", "HEAD"], cwd=workspace_dir, capture_output=True, text=True, check=True)
+                safe_commit_hash = hash_proc.stdout.strip()
+            except Exception as e:
+                safe_commit_hash = None
+                logging.warning(f"Failed to capture safe commit hash: {e}")
+
             await devhouse_queue.put({"type": "info", "message": f"[DEV] Iteration {iteration}/{max_iterations}: Sending instructions to Jules..."})
             save_state(iteration, accumulated_context, 'running')
 
@@ -743,13 +800,28 @@ async def run_devhouse_autopilot(task_id, initial_prompt, target_repo, kb_links,
                  if returncode != 0:
                       await devhouse_queue.put({"type": "ci_failed", "message": "[CI] ❌ Build Failed! Sending stack trace back to Developer."})
 
+                      fix_count += 1
+
+                      # Phase 3: Git Time-Machine Rollback
+                      if fix_count >= 2 and safe_commit_hash:
+                          await devhouse_queue.put({"type": "error", "message": f"[TIME-MACHINE] ⚠️ Jules entered an error spiral. Rolling back to previous stable commit..."})
+                          try:
+                              subprocess.run(["git", "reset", "--hard", safe_commit_hash], cwd=workspace_dir, check=True)
+                          except Exception as e:
+                              logging.error(f"Time-Machine Rollback failed: {e}")
+
+                          # Reset fix count so Jules gets another chance at the feature from a clean slate
+                          fix_count = 0
+                          # Clear the specific CI error loop instruction
+                          jules_instruction = f"Your previous code caused a CI spiral and was rolled back. Re-attempt the feature from scratch, ensuring it compiles properly. Original Request:\n{initial_prompt}"
+                          continue
+
                       stderr = stderr_bytes.decode()
                       stdout_str = stdout_bytes.decode()
                       stdout_lines = "\n".join(stdout_str.splitlines()[-50:]) if stdout_str else ""
 
                       jules_instruction = f"[SYSTEM CI ALERT] The code you just wrote caused a build failure. Do NOT write new features. Fix the compilation errors immediately based on this stack trace:\n\nSTDERR:\n{stderr}\n\nSTDOUT (Last 50 lines):\n{stdout_lines}"
 
-                      fix_count += 1
                       if fix_count > max_fix_iterations:
                           raise Exception("Jules failed to fix CI errors after 3 attempts.")
                       continue # Re-run the iteration without incrementing counter

@@ -19,6 +19,7 @@ export default function Cockpit() {
     const [maxIterations] = useState(5);
     const [logs, setLogs] = useState<{message: string, type: "info"|"action"|"error"|"review"|"ci"|"ci_failed"|"ci_success"}[]>([]);
     const [queue, setQueue] = useState<any[]>([]);
+    const [isRadarActive, setIsRadarActive] = useState(false);
 
     const [isMerging, setIsMerging] = useState(false);
 
@@ -269,7 +270,12 @@ export default function Cockpit() {
             {/* Center: Orchestration Feed */}
             <div className="flex-1 p-6 flex flex-col bg-slate-50 relative">
                 <div className="flex items-center justify-between mb-4 border-b border-slate-200 pb-2">
-                    <h2 className="text-lg font-bold text-slate-700">Orchestration Feed</h2>
+                    <h2 className="text-lg font-bold text-slate-700 flex items-center gap-2">
+                        Orchestration Feed
+                        {isRadarActive && <span className="ml-2 text-xs font-bold text-emerald-800 bg-emerald-200 py-1 px-3 rounded-md border border-emerald-400 shadow-sm animate-pulse">
+                            🎯 Codebase RAG Active
+                        </span>}
+                    </h2>
                     <button
                         onClick={handleTriggerReview}
                         disabled={!activeBranch || isReviewing}
