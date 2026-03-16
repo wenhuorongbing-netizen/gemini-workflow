@@ -113,6 +113,8 @@ const nodeTypes = {
   state: StateNode,
   file: FileNode,
   webhook: WebhookNode,
+  router: RouterNode,
+  approval: ApprovalNode,
 };
 
 const initialNodes: Node[] = [
@@ -398,6 +400,54 @@ const PropertiesPanel = ({ selectedNodeId, nodes, updateNodeData, isPlaybackMode
                           }} />
                       </label>
                   )}
+                </div>
+              </div>
+            )}
+
+            {node.type === 'approval' && (
+              <div className="space-y-4">
+                <p className="text-sm text-amber-700 bg-amber-50 p-3 rounded border border-amber-200">
+                  This node will pause the workflow execution. A human user must manually approve the state in the App Dashboard before the workflow can proceed to the next node.
+                </p>
+              </div>
+            )}
+
+            {node.type === 'router' && (
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Target Variable</label>
+                  <input
+                    type="text"
+                    className="w-full px-3 py-2 border border-slate-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-yellow-500 focus:border-yellow-500"
+                    value={node.data.targetVariable as string || ''}
+                    onChange={(e) => updateNodeData(node.id, { targetVariable: e.target.value })}
+                    disabled={isPlaybackMode}
+                    placeholder="{{NODE_1_OUTPUT}}"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Condition</label>
+                  <select
+                    className="w-full px-3 py-2 border border-slate-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-yellow-500 bg-white"
+                    value={node.data.condition as string || 'CONTAINS'}
+                    onChange={(e) => updateNodeData(node.id, { condition: e.target.value })}
+                    disabled={isPlaybackMode}
+                  >
+                    <option value="CONTAINS">Contains</option>
+                    <option value="EQUALS">Equals</option>
+                    <option value="NOT CONTAINS">Does Not Contain</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Value</label>
+                  <input
+                    type="text"
+                    className="w-full px-3 py-2 border border-slate-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-yellow-500 focus:border-yellow-500"
+                    value={node.data.conditionValue as string || ''}
+                    onChange={(e) => updateNodeData(node.id, { conditionValue: e.target.value })}
+                    disabled={isPlaybackMode}
+                    placeholder="e.g. URGENT"
+                  />
                 </div>
               </div>
             )}
@@ -1451,11 +1501,13 @@ export default function AppShell() {
 
         {/* Toolbar */}
         {true && (
-            <div className="bg-slate-100 border-b border-slate-200 px-6 py-2 flex items-center gap-2 z-10 shadow-sm">
+            <div className="bg-slate-100 border-b border-slate-200 px-6 py-2 flex flex-wrap items-center gap-2 z-10 shadow-sm">
                 <span className="text-sm font-bold text-slate-500 mr-2 uppercase tracking-wide">Nodes:</span>
                 <button onClick={() => addNode('gemini')} className="px-3 py-1.5 bg-white border border-slate-300 rounded text-sm font-medium hover:bg-blue-50 text-blue-700 transition flex items-center gap-1"><Bot size={14}/> Gemini AI</button>
                 <button onClick={() => addNode('scraper')} className="px-3 py-1.5 bg-white border border-slate-300 rounded text-sm font-medium hover:bg-amber-50 text-amber-700 transition flex items-center gap-1"><Globe size={14}/> Web Scraper</button>
                 <button onClick={() => addNode('webhook')} className="px-3 py-1.5 bg-white border border-slate-300 rounded text-sm font-medium hover:bg-fuchsia-50 text-fuchsia-700 transition flex items-center gap-1"><Globe size={14}/> Webhook</button>
+                <button onClick={() => addNode('router')} className="px-3 py-1.5 bg-white border border-slate-300 rounded text-sm font-medium hover:bg-yellow-50 text-yellow-700 transition flex items-center gap-1"><Repeat size={14}/> Router</button>
+                <button onClick={() => addNode('approval')} className="px-3 py-1.5 bg-white border border-slate-300 rounded text-sm font-bold hover:bg-amber-100 text-amber-700 transition flex items-center gap-1">✋ Approval</button>
                 <button onClick={() => addNode('file')} className="px-3 py-1.5 bg-white border border-slate-300 rounded text-sm font-medium hover:bg-emerald-50 text-emerald-700 transition flex items-center gap-1"><Database size={14}/> Upload File</button>
                 <button onClick={() => addNode('agentic_loop')} className="px-3 py-1.5 bg-white border border-slate-300 rounded text-sm font-medium hover:bg-purple-50 text-purple-700 transition flex items-center gap-1"><Repeat size={14}/> Agent Loop</button>
                 <button onClick={() => addNode('state')} className="px-3 py-1.5 bg-white border border-slate-300 rounded text-sm font-medium hover:bg-slate-200 text-slate-700 transition flex items-center gap-1"><Database size={14}/> Global State</button>

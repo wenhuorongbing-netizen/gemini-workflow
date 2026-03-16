@@ -318,11 +318,17 @@ if (!workflow) return <div className="h-screen flex items-center justify-center 
                                         if (file) {
                                             Papa.parse(file, {
                                                 header: true,
-                                                skipEmptyLines: true,
+                                                skipEmptyLines: "greedy",
                                                 complete: (results) => {
                                                     if (results.data && results.data.length > 0) {
-                                                        setCsvData(results.data);
-                                                        setCsvHeaders(Object.keys(results.data[0]));
+                                                        // Filter out rows where every column value is empty or just whitespace
+                                                        const cleanData = results.data.filter((row: any) =>
+                                                            Object.values(row).some((val: any) => typeof val === 'string' && val.trim() !== '')
+                                                        );
+                                                        setCsvData(cleanData);
+                                                        if(cleanData.length > 0) {
+                                                            setCsvHeaders(Object.keys(cleanData[0]));
+                                                        }
                                                     }
                                                 },
                                                 error: (err) => alert(err.message)
@@ -440,8 +446,8 @@ if (!workflow) return <div className="h-screen flex items-center justify-center 
                                  <div key={run.id} className="p-6">
                                      <div className="flex justify-between items-center mb-4">
                                          <div className="flex items-center gap-3">
-                                            <span className={`text-xs font-bold px-2 py-1 rounded ${run.status === 'Workflow Finished' || run.status === 'Complete' ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>
-                                                {run.status === 'Workflow Finished' ? 'Success' : 'Failed'}
+                                            <span className={`text-xs font-bold px-2 py-1 rounded ${run.status === 'Workflow Finished' || run.status === 'Complete' ? 'bg-emerald-100 text-emerald-700' : run.status === 'PENDING_APPROVAL' ? 'bg-amber-100 text-amber-700' : 'bg-rose-100 text-rose-700'}`}>
+                                                {run.status === 'Workflow Finished' ? 'Success' : run.status === 'PENDING_APPROVAL' ? 'Needs Approval' : 'Failed'}
                                             </span>
                                             <span className="text-xs text-slate-400 font-mono">
                                                 {new Date(run.createdAt).toLocaleString()}
@@ -476,6 +482,61 @@ if (!workflow) return <div className="h-screen flex items-center justify-center 
                                      <div className="text-sm text-slate-600 bg-slate-50 p-4 rounded-lg font-mono overflow-x-auto whitespace-pre-wrap max-h-64 overflow-y-auto">
                                          {finalOutput}
                                      </div>
+
+                                     {run.status === 'PENDING_APPROVAL' && (
+                                         <div className="mt-4 flex gap-4 p-4 bg-amber-50 border border-amber-200 rounded-lg">
+                                            <div className="flex-1">
+                                                <p className="text-xs font-bold text-amber-800 mb-2">HITL Approval Required</p>
+                                                <p className="text-xs text-amber-700">The workflow has paused at this node. Review the output above before proceeding.</p>
+                                            </div>
+                                            <div className="flex gap-2">
+                                                <button onClick={async () => {
+                                                    const res = await fetch('/api/runs/resume', {
+                                                        method: 'POST',
+                                                        headers: { 'Content-Type': 'application/json', 'x-user-id': currentUserId },
+                                                        body: JSON.stringify({ run_id: run.id, action: 'reject' })
+                                                    });
+                                                    if(res.ok) fetchRecentRuns(workflowId);
+                                                }} className="px-4 py-2 bg-white text-rose-600 border border-rose-200 hover:bg-rose-50 rounded font-bold text-xs shadow-sm">
+                                                    ❌ Reject
+                                                </button>
+                                                <button onClick={async () => {
+                                                    setIsExecuting(true);
+                                                    const res = await fetch('/api/runs/resume', {
+                                                        method: 'POST',
+                                                        headers: { 'Content-Type': 'application/json', 'x-user-id': currentUserId },
+                                                        body: JSON.stringify({ run_id: run.id, action: 'approve', text: finalOutput })
+                                                    });
+                                                    if(res.ok) {
+                                                        const data = await res.json();
+                                                        const eventSource = new EventSource(`http://127.0.0.1:5000/api/logs/${data.task_id}`);
+                                                        eventSource.onmessage = async (event) => {
+                                                            if (event.data === "__DONE__") {
+                                                                eventSource.close();
+                                                                setIsExecuting(false);
+                                                                fetchRecentRuns(workflowId);
+                                                                return;
+                                                            }
+                                                            try {
+                                                                const parsed = JSON.parse(event.data);
+                                                                if (parsed.status) setLogs(prev => [...prev, { status: parsed.status, message: parsed.message || parsed.result || "" }]);
+                                                                if (parsed.status === 'Workflow Finished' || parsed.status === 'Error' || parsed.status === 'Canceled') {
+                                                                    setIsExecuting(false);
+                                                                    eventSource.close();
+                                                                    fetchRecentRuns(workflowId);
+                                                                }
+                                                            } catch(e){}
+                                                        };
+                                                    } else {
+                                                        setIsExecuting(false);
+                                                        alert("Failed to resume.");
+                                                    }
+                                                }} className="px-4 py-2 bg-amber-500 hover:bg-amber-600 text-white rounded font-bold text-xs shadow-md">
+                                                    ✅ Approve & Continue
+                                                </button>
+                                            </div>
+                                         </div>
+                                     )}
                                  </div>
                              )})}
                          </div>

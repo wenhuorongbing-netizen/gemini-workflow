@@ -414,7 +414,7 @@ async def index(request: Request):
 import uuid
 task_streams = {}
 
-async def run_workflow_engine(steps, workspace_id, stream_queue=None, profile_id="1", run_variables=None, global_state=None):
+async def run_workflow_engine(steps, workspace_id, stream_queue=None, profile_id="1", run_variables=None, global_state=None, user_id="user1", start_index=0, initial_results=None):
     if run_variables is None:
         run_variables = {}
     if global_state is None:
@@ -422,12 +422,12 @@ async def run_workflow_engine(steps, workspace_id, stream_queue=None, profile_id
     run_id = str(uuid.uuid4())
     page = None
     try:
-        results = {}
+        results = initial_results if initial_results is not None else {}
         correction_counts = {}
         page = None
         current_bot = None
 
-        index = 0
+        index = start_index
         while index < len(steps):
             step = steps[index]
             step_profile_id = step.get('profileId', profile_id)
@@ -742,50 +742,62 @@ async def run_workflow_engine(steps, workspace_id, stream_queue=None, profile_id
                 index += 1
                 continue
 
-            elif step_type == 'logic':
-                # Evaluate logic gate
-                import re
-                try:
-                    # Very simple parsing: IF {{OUTPUT_X}} CONTAINS "str" THEN GOTO STEP Y
-                    match = re.search(r'IF\s+(.*?)\s+(CONTAINS|EQUALS|NOT CONTAINS)\s+"(.*?)"\s+THEN\s+GOTO\s+STEP\s+(\d+)', prompt_template, re.IGNORECASE)
-                    if match:
-                        var_raw, op, val, target_step_str = match.groups()
+            elif step_type == 'router':
+                target_variable = step.get('targetVariable', '')
+                condition = step.get('condition', 'CONTAINS')
+                condition_value = step.get('conditionValue', '')
 
-                        # Resolve variable
-                        var_val = var_raw
-                        for past_id, past_output in results.items():
-                            tag = f"{{{{OUTPUT_{past_id}}}}}"
-                            if tag in var_val:
-                                var_val = var_val.replace(tag, past_output)
+                true_target = step.get('trueTarget')
+                false_target = step.get('falseTarget')
 
-                        condition_met = False
-                        op = op.upper()
-                        if op == 'CONTAINS':
-                            condition_met = val in var_val
-                        elif op == 'NOT CONTAINS':
-                            condition_met = val not in var_val
-                        elif op == 'EQUALS':
-                            condition_met = val == var_val
+                # Resolve variable
+                var_val = target_variable
+                for past_id, past_output in results.items():
+                    tag = f"{{{{OUTPUT_{past_id}}}}}"
+                    if tag in var_val:
+                        var_val = var_val.replace(tag, str(past_output))
 
-                        target_step = int(target_step_str)
-                        if condition_met:
-                            if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Logic Evaluated', 'message': f'Condition met. Jumping to Step {target_step}.'})}\n\n"
-                            results[str(step_id)] = f"Logic Gate evaluated to True. Jumped to Step {target_step}."
-                            index = target_step - 1
-                            continue
-                        else:
-                            if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Logic Evaluated', 'message': 'Condition not met. Continuing...'})}\n\n"
-                            results[str(step_id)] = "Logic Gate evaluated to False. Continued."
+                for s in steps:
+                    tag = f"{{{{{s.get('id', '')}}}}}"
+                    if tag in var_val and s.get('id', '') in results:
+                        var_val = var_val.replace(tag, str(results[s.get('id', '')]))
+
+                condition_met = False
+                op = condition.upper()
+                if op == 'CONTAINS':
+                    condition_met = condition_value in var_val
+                elif op == 'NOT CONTAINS':
+                    condition_met = condition_value not in var_val
+                elif op == 'EQUALS':
+                    condition_met = condition_value == var_val
+
+                target_node_id = true_target if condition_met else false_target
+
+                msg = f"Condition evaluated to {condition_met}."
+                if target_node_id:
+                    msg += f" Routing to {target_node_id}..."
+                else:
+                    msg += " No valid route found, ending branch."
+
+                if stream_queue: yield f"data: {{json.dumps({{'step': step_id, 'status': 'Routing', 'message': msg}})}}\n\n"
+                results[str(step_id)] = msg
+
+                if target_node_id:
+                    # Find index of target_node_id in steps
+                    next_index = -1
+                    for i, s in enumerate(steps):
+                        if str(s['id']) == str(target_node_id):
+                            next_index = i
+                            break
+                    if next_index != -1:
+                        index = next_index
+                        continue
                     else:
-                        if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Error', 'message': 'Invalid Logic Gate syntax'})}\n\n"
-                        results[str(step_id)] = "[FAILED] Invalid Logic Gate syntax"
-                except Exception as e:
-                    if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Error', 'message': str(e)})}\n\n"
-                    results[str(step_id)] = f"[FAILED] {e}"
-
-                if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Complete', 'result': results[str(step_id)], 'show_result': show_result})}\n\n"
-                index += 1
-                continue
+                        if stream_queue: yield f"data: {{json.dumps({{'step': step_id, 'status': 'Error', 'message': 'Target node not found in compilation order.'}})}}\n\n"
+                        break
+                else:
+                    # No path defined for this condition outcome, workflow terminates gracefully.
+                    break
 
             elif step_type == 'webhook':
                 webhook_url = chat_url # Reuse chat_url field for webhook url
@@ -809,13 +821,16 @@ async def run_workflow_engine(steps, workspace_id, stream_queue=None, profile_id
                 try:
                     payload = json.loads(final_payload_str)
                     async with httpx.AsyncClient() as client:
-                        resp = await client.post(webhook_url, json=payload, timeout=15.0)
+                        resp = await client.post(webhook_url, json=payload, timeout=10.0)
                         resp.raise_for_status()
                         results[str(step_id)] = f"Webhook success: {resp.status_code}\n{resp.text}"
-                        if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Complete', 'result': results[str(step_id)], 'show_result': show_result})}\n\n"
+                        if stream_queue: yield f"data: {{json.dumps({{'step': step_id, 'status': 'Complete', 'result': results[str(step_id)], 'show_result': show_result}})}}\n\n"
+                except httpx.TimeoutException:
+                    results[str(step_id)] = f"[WEBHOOK FAILED] Request timed out after 10 seconds."
+                    if stream_queue: yield f"data: {{json.dumps({{'step': step_id, 'status': 'Error', 'result': results[str(step_id)]}})}}\n\n"
                 except Exception as e:
                     results[str(step_id)] = f"[WEBHOOK FAILED] {str(e)}"
-                    if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Error', 'result': results[str(step_id)]})}\n\n"
+                    if stream_queue: yield f"data: {{json.dumps({{'step': step_id, 'status': 'Error', 'result': results[str(step_id)]}})}}\n\n"
 
                 index += 1
                 continue
@@ -1230,6 +1245,67 @@ async def execution_wrapper(task_id, steps, workspace_id, profile_id, run_variab
     finally:
         bot_semaphore.release()
         await task_streams[task_id].put("__DONE__")
+
+@app.post("/resume")
+async def resume_workflow(request: Request):
+    try:
+        data = await request.json()
+        run_id = data.get('run_id')
+        action = data.get('action') # 'approve' or 'reject'
+        edited_text = data.get('text', '')
+
+        import sqlite3, os
+        db_path = os.path.join(os.path.dirname(__file__), 'dev.db')
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT logs, userId, workflowId FROM RunHistory WHERE id = ?", (run_id,))
+        row = cursor.fetchone()
+
+        if not row:
+            conn.close()
+            return JSONResponse({"error": "Run not found"}, status_code=404)
+
+        state_str, user_id, workspace_id = row
+        state = json.loads(state_str)
+
+        if action == 'reject':
+            cursor.execute("UPDATE RunHistory SET status = 'Canceled' WHERE id = ?", (run_id,))
+            conn.commit()
+            conn.close()
+            return JSONResponse({"status": "rejected"})
+
+        index = state['index']
+        steps = state['steps']
+        results = state['results']
+
+        approval_step_id = steps[index-1]['id']
+        results[str(approval_step_id)] = edited_text
+
+        task_id = str(uuid.uuid4())
+        task_streams[task_id] = asyncio.Queue()
+
+        # Dispatch background task resuming from index
+        asyncio.create_task(task_worker(
+            task_id,
+            steps,
+            workspace_id,
+            "1", # profile_id
+            state['run_variables'],
+            state['global_state'],
+            user_id,
+            start_index=index,
+            initial_results=results
+        ))
+
+        cursor.execute("UPDATE RunHistory SET status = 'Resumed' WHERE id = ?", (run_id,))
+        conn.commit()
+        conn.close()
+
+        return {"task_id": task_id, "status": "resumed"}
+
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 @app.post("/execute")
 async def execute_workflow(request: Request):
