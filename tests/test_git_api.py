@@ -4,8 +4,9 @@ import app
 import sys
 from unittest.mock import patch, MagicMock
 
-# Mock github module directly so PyGithub isn't called during unit tests
+# Mock github and google.generativeai modules directly so external APIs aren't called
 sys.modules['github'] = MagicMock()
+sys.modules['google.generativeai'] = MagicMock()
 
 client = TestClient(app.app)
 
@@ -54,3 +55,30 @@ def test_post_devhouse_merge(mock_merge_and_delete_branch):
     assert data["status"] == "success"
     assert data["merged"] == True
     mock_merge_and_delete_branch.assert_called_once_with("devhouse-test-123", "main")
+
+@patch('app.get_branch_diff')
+def test_post_devhouse_review_no_changes(mock_get_branch_diff):
+    mock_get_branch_diff.return_value = "   "
+
+    payload = {
+        "feature_branch": "devhouse-test-123"
+    }
+
+    response = client.post("/api/devhouse/review", json=payload)
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "no_changes"
+
+@patch('app.get_github_repo')
+def test_auth_exception_handling(mock_get_github_repo):
+    mock_get_github_repo.side_effect = app.AuthException("Please add a valid GITHUB_TOKEN to your .env file")
+
+    payload = {
+        "prompt": "Test auth",
+    }
+    response = client.post("/api/devhouse/start", json=payload)
+
+    assert response.status_code == 401
+    data = response.json()
+    assert "Please add a valid GITHUB_TOKEN" in data["error"]

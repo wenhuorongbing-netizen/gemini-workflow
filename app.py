@@ -23,10 +23,19 @@ GITHUB_REPO = os.environ.get("GITHUB_REPO", "")
 
 gh_client = Github(GITHUB_TOKEN) if GITHUB_TOKEN else None
 
+class AuthException(Exception):
+    pass
+
 def get_github_repo():
     if not gh_client or not GITHUB_REPO:
-        raise Exception("GitHub client not configured. Check GITHUB_TOKEN and GITHUB_REPO in .env")
-    return gh_client.get_repo(GITHUB_REPO)
+        raise AuthException("Please add a valid GITHUB_TOKEN to your .env file")
+    from github.GithubException import GithubException
+    try:
+        return gh_client.get_repo(GITHUB_REPO)
+    except GithubException as e:
+        if e.status == 401:
+            raise AuthException("Please add a valid GITHUB_TOKEN to your .env file")
+        raise e
 
 def create_feature_branch(base_branch="main", new_branch_name=None):
     if not new_branch_name:
@@ -43,6 +52,16 @@ def get_branch_diff(base_branch="main", compare_branch=None):
     comparison = repo.compare(base_branch, compare_branch)
     diff = []
     for file in comparison.files:
+        filename = file.filename
+        if (
+            filename.endswith("package-lock.json") or
+            filename.endswith("yarn.lock") or
+            filename.endswith(".svg") or
+            filename.endswith(".png") or
+            ".next/" in filename or
+            "node_modules/" in filename
+        ):
+            continue
         diff.append(f"File: {file.filename}\nStatus: {file.status}\nDiff:\n{file.patch}\n")
     return "\n".join(diff)
 
@@ -465,6 +484,8 @@ async def api_devhouse_diff(compare_branch: str, base_branch: str = "main"):
     try:
         diff = get_branch_diff(base_branch, compare_branch)
         return {"status": "success", "diff": diff}
+    except AuthException as e:
+        return JSONResponse({"error": str(e)}, status_code=401)
     except Exception as e:
         return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
 
@@ -478,6 +499,41 @@ async def api_devhouse_merge(request: Request):
     try:
         result = merge_and_delete_branch(head_branch, base_branch)
         return result
+    except AuthException as e:
+        return JSONResponse({"error": str(e)}, status_code=401)
+    except Exception as e:
+        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+
+import google.generativeai as genai
+
+@app.post("/api/devhouse/review")
+async def api_devhouse_review(request: Request):
+    data = await request.json()
+    base_branch = data.get("base_branch", "main")
+    feature_branch = data.get("feature_branch")
+
+    if not feature_branch:
+        return JSONResponse({"status": "error", "message": "feature_branch is required"}, status_code=400)
+
+    try:
+        diff = get_branch_diff(base_branch, feature_branch)
+        if not diff.strip():
+            return {"status": "no_changes"}
+
+        gemini_api_key = os.environ.get("GEMINI_API_KEY")
+        if not gemini_api_key:
+            return JSONResponse({"status": "error", "message": "GEMINI_API_KEY is not set in .env"}, status_code=500)
+
+        genai.configure(api_key=gemini_api_key)
+        model = genai.GenerativeModel('gemini-1.5-pro')
+
+        prompt = f"You are the Lead Technical PM. Review this code diff. Ensure it meets the goal without introducing regressions. Diff: {diff}"
+        response = model.generate_content(prompt)
+
+        return {"status": "success", "review": response.text}
+
+    except AuthException as e:
+        return JSONResponse({"error": str(e)}, status_code=401)
     except Exception as e:
         return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
 
@@ -492,6 +548,8 @@ async def api_devhouse_start(request: Request):
     try:
         branch = create_feature_branch("main", new_branch_name)
         return {"status": "success", "branch": branch, "message": "Started Auto-Dev loop on new branch."}
+    except AuthException as e:
+        return JSONResponse({"error": str(e)}, status_code=401)
     except Exception as e:
         return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
 

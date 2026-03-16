@@ -1,10 +1,13 @@
 "use client";
 
-import { useState } from "react";
-import { Play, RotateCcw, GitBranch, GitMerge, Loader2 } from "lucide-react";
+import { useState, useRef, useEffect } from "react";
+import { Play, RotateCcw, GitBranch, GitMerge, Loader2, Eye } from "lucide-react";
+import ReactMarkdown from "react-markdown";
 
 export default function Cockpit() {
     const [prompt, setPrompt] = useState("");
+    const messagesEndRef = useRef<HTMLDivElement>(null);
+    const [isReviewing, setIsReviewing] = useState(false);
     const [kbLinks, setKbLinks] = useState("");
     const [model, setModel] = useState("Pro");
     const [isStarting, setIsStarting] = useState(false);
@@ -12,11 +15,19 @@ export default function Cockpit() {
     const [activeBranch, setActiveBranch] = useState<string | null>(null);
     const [iteration, setIteration] = useState(1);
     const [maxIterations] = useState(5);
-    const [logs, setLogs] = useState<{message: string, type: "info"|"action"|"error"}[]>([]);
+    const [logs, setLogs] = useState<{message: string, type: "info"|"action"|"error"|"review"}[]>([]);
 
     const [isMerging, setIsMerging] = useState(false);
 
-    const addLog = (msg: string, type: "info"|"action"|"error" = "info") => {
+    const scrollToBottom = () => {
+        messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    };
+
+    useEffect(() => {
+        scrollToBottom();
+    }, [logs]);
+
+    const addLog = (msg: string, type: "info"|"action"|"error"|"review" = "info") => {
         setLogs(prev => [...prev, { message: msg, type }]);
     };
 
@@ -39,12 +50,40 @@ export default function Cockpit() {
                 addLog(`Created new feature branch: ${data.branch}`, "action");
                 addLog(`Gemini PM is analyzing requirements using model ${model}...`, "info");
             } else {
-                addLog(`Failed to start: ${data.message}`, "error");
+                addLog(`Failed to start: ${data.error || data.message}`, "error");
             }
         } catch (error: any) {
             addLog(`Error connecting to backend: ${error.message}`, "error");
         } finally {
             setIsStarting(false);
+        }
+    };
+
+    const handleTriggerReview = async () => {
+        if (!activeBranch) return;
+        setIsReviewing(true);
+        addLog(`Triggering code review for branch ${activeBranch}...`, "info");
+        try {
+            const res = await fetch("/api/devhouse/review", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ feature_branch: activeBranch })
+            });
+            const data = await res.json();
+
+            if (res.status === 401) {
+                 addLog(data.error || "Unauthorized", "error");
+            } else if (res.ok && data.status === "success") {
+                 addLog(data.review, "review");
+            } else if (res.ok && data.status === "no_changes") {
+                 addLog(`No changes found on branch ${activeBranch}.`, "info");
+            } else {
+                 addLog(`Review failed: ${data.message || data.error}`, "error");
+            }
+        } catch (error: any) {
+            addLog(`Error during review: ${error.message}`, "error");
+        } finally {
+            setIsReviewing(false);
         }
     };
 
@@ -64,7 +103,7 @@ export default function Cockpit() {
                 setActiveBranch(null);
                 setIteration(1);
             } else {
-                addLog(`Merge failed: ${data.message}`, "error");
+                addLog(`Merge failed: ${data.error || data.message}`, "error");
             }
         } catch (error: any) {
             addLog(`Error during merge: ${error.message}`, "error");
@@ -126,20 +165,37 @@ export default function Cockpit() {
 
             {/* Center: Orchestration Feed */}
             <div className="flex-1 p-6 flex flex-col bg-slate-50 relative">
-                <h2 className="text-lg font-bold text-slate-700 mb-4 border-b border-slate-200 pb-2">Orchestration Feed</h2>
+                <div className="flex items-center justify-between mb-4 border-b border-slate-200 pb-2">
+                    <h2 className="text-lg font-bold text-slate-700">Orchestration Feed</h2>
+                    <button
+                        onClick={handleTriggerReview}
+                        disabled={!activeBranch || isReviewing}
+                        className="bg-purple-600 hover:bg-purple-700 disabled:bg-purple-300 text-white font-bold py-1.5 px-3 rounded shadow transition-all flex items-center justify-center gap-2 text-sm"
+                    >
+                        {isReviewing ? <Loader2 size={16} className="animate-spin" /> : <Eye size={16} />}
+                        Trigger Code Review
+                    </button>
+                </div>
                 <div className="flex-1 overflow-y-auto space-y-3 font-mono text-sm bg-slate-900 rounded-lg p-4 shadow-inner text-slate-300">
                     {logs.length === 0 ? (
                         <div className="text-slate-500 italic h-full flex items-center justify-center">System idle. Awaiting initial prompt...</div>
                     ) : (
                         logs.map((log, idx) => (
-                            <div key={idx} className="border-b border-slate-800 pb-2 last:border-0">
-                                <span className={`mr-2 font-bold ${log.type === 'error' ? 'text-rose-500' : log.type === 'action' ? 'text-blue-400' : 'text-emerald-400'}`}>
-                                    [{new Date().toLocaleTimeString()}]
-                                </span>
-                                {log.message}
+                            <div key={idx} className="border-b border-slate-800 pb-4 last:border-0">
+                                <div className={`font-bold mb-1 ${log.type === 'error' ? 'text-rose-500' : log.type === 'action' ? 'text-blue-400' : log.type === 'review' ? 'text-purple-400' : 'text-emerald-400'}`}>
+                                    [{new Date().toLocaleTimeString()}] {log.type === 'error' && "ERROR"} {log.type === 'review' && "GEMINI REVIEW"}
+                                </div>
+                                {log.type === 'review' ? (
+                                    <div className="prose prose-invert prose-sm max-w-none prose-pre:bg-slate-800">
+                                        <ReactMarkdown>{log.message}</ReactMarkdown>
+                                    </div>
+                                ) : (
+                                    <div className="whitespace-pre-wrap">{log.message}</div>
+                                )}
                             </div>
                         ))
                     )}
+                    <div ref={messagesEndRef} />
                 </div>
             </div>
 
