@@ -885,9 +885,78 @@ async def run_devhouse_autopilot(task_id, initial_prompt, target_repo, kb_links,
                       continue # Re-run the iteration without incrementing counter
                  else:
                       fix_count = 0
-                      await devhouse_queue.put({"type": "ci_success", "message": "[CI] ✅ Build Passed! Proceeding to PM Review."})
+                      await devhouse_queue.put({"type": "ci_success", "message": "[CI] ✅ Build Passed! Proceeding to Agent Swarm Validation."})
             except Exception as e:
                  await devhouse_queue.put({"type": "error", "message": f"[CI] ❌ Unknown Execution Error: {e}"})
+                 raise e
+
+            # ==========================================
+            # V41 Phase 1 & 2: The Agent Swarm & TDD Gate
+            # ==========================================
+            try:
+                # 1. SecOps Agent Review
+                await devhouse_queue.put({"type": "info", "message": f"[SECOPS] 🛡️ SecOps Agent analyzing diff for vulnerabilities..."})
+                secops_prompt = f"You are a strict SecOps Engineer. Analyze this code diff for hardcoded secrets, SQL injection, XSS, or OWASP top 10 vulnerabilities.\nIf you find ANY security risk, explain it. If the code is safe, reply exactly with 'APPROVED'.\n\nDiff:\n{latest_diff}"
+                secops_response = pm_model.generate_content(secops_prompt)
+
+                if hasattr(secops_response, 'usage_metadata'):
+                    pm_tokens_burned += secops_response.usage_metadata.total_token_count
+
+                secops_text = secops_response.text.strip()
+                if "APPROVED" not in secops_text.upper():
+                    await devhouse_queue.put({"type": "error", "message": f"[SECOPS] 🛑 Security Violation Detected:\n{secops_text}"})
+                    jules_instruction = f"[SECOPS REJECTION] Fix the following security vulnerabilities immediately:\n{secops_text}"
+                    continue
+
+                await devhouse_queue.put({"type": "ci_success", "message": "[SECOPS] ✅ Security check passed."})
+
+                # 2. QA Agent Review & TDD Test Generation
+                await devhouse_queue.put({"type": "info", "message": f"[QA] 🧪 QA Agent generating TDD test cases..."})
+                qa_prompt = f"You are a strict QA Test Engineer. Review this code diff. Write a simple functional frontend or API test script using `pytest` or `vitest` that targets the new feature. Return ONLY the script inside a ```python or ```javascript markdown block.\n\nDiff:\n{latest_diff}"
+                qa_response = pm_model.generate_content(qa_prompt)
+
+                if hasattr(qa_response, 'usage_metadata'):
+                    pm_tokens_burned += qa_response.usage_metadata.total_token_count
+
+                qa_text = qa_response.text
+                import re
+                code_blocks = re.findall(r'```(?:python|javascript|js|typescript|ts)?\n(.*?)\n```', qa_text, re.DOTALL)
+
+                if code_blocks:
+                    test_script_content = code_blocks[0]
+                    test_file_path = os.path.join(workspace_dir, "devhouse_swarm_test.spec.js") # For NPM run test compliance
+                    with open(test_file_path, "w") as f:
+                        f.write(test_script_content)
+
+                    await devhouse_queue.put({"type": "info", "message": f"[QA] ⚙️ Running generated TDD tests..."})
+
+                    test_proc = await asyncio.create_subprocess_exec(
+                        "npm", "run", "test",
+                        cwd=workspace_dir,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE
+                    )
+
+                    try:
+                        test_stdout, test_stderr = await asyncio.wait_for(test_proc.communicate(), timeout=60.0)
+                    except asyncio.TimeoutError:
+                        test_proc.kill()
+                        await devhouse_queue.put({"type": "error", "message": f"[QA] 🛑 TDD Gate Failed: Timeout running tests."})
+                        jules_instruction = f"[QA REJECTION] Fix the code. The QA test timed out."
+                        continue
+
+                    if test_proc.returncode != 0:
+                        test_error = test_stderr.decode('utf-8') or test_stdout.decode('utf-8')
+                        await devhouse_queue.put({"type": "error", "message": f"[QA] 🛑 TDD Gate Failed:\n{test_error}"})
+                        jules_instruction = f"[QA REJECTION] Fix the code so it passes the QA test. Here is the failing test error:\n{test_error}"
+                        continue
+
+                    await devhouse_queue.put({"type": "ci_success", "message": "[QA] ✅ TDD tests passed!"})
+                else:
+                    await devhouse_queue.put({"type": "info", "message": "[QA] ⚠️ No test block generated. Proceeding to PM."})
+
+            except Exception as e:
+                 await devhouse_queue.put({"type": "error", "message": f"[SWARM] ❌ Swarm execution error: {e}"})
                  raise e
 
             # Phase 2: Live Preview Engine & UAT Gate
@@ -986,6 +1055,19 @@ async def run_devhouse_autopilot(task_id, initial_prompt, target_repo, kb_links,
         merge_and_delete_branch(branch_name, "main", target_repo)
         save_state(max_iterations, accumulated_context, 'finished')
 
+        # V40 + V41 Deploy Webhook Logic
+        deploy_webhook_url = os.environ.get("DEPLOY_WEBHOOK_URL")
+        if deploy_webhook_url:
+            try:
+                deploy_secret = os.environ.get("DEPLOY_SECRET", "")
+                headers = {"Authorization": f"Bearer {deploy_secret}"} if deploy_secret else {}
+                import httpx
+                async with httpx.AsyncClient() as client:
+                    await client.post(deploy_webhook_url, headers=headers)
+                await devhouse_queue.put({"type": "info", "message": f"[CD] 🚀 Code merged to main. Deployment webhook triggered!"})
+            except Exception as e:
+                logging.error(f"Failed to trigger deploy webhook: {e}")
+
         await devhouse_queue.put({"type": "info", "message": f"[SYSTEM] Merge complete. DevHouse Autopilot cycle finished."})
 
     except Exception as e:
@@ -1083,6 +1165,45 @@ async def queue_runner_loop():
         except Exception as e:
             logging.error(f"Queue runner error: {e}")
             await asyncio.sleep(5)
+
+@app.post("/api/devhouse/sentry")
+async def api_devhouse_sentry(request: Request, background_tasks: BackgroundTasks):
+    """
+    V41 Self-Healing Webhook Endpoint.
+    Receives crash reports from production, injects a P0 Hotfix task at the VERY TOP of the queue.
+    """
+    try:
+        data = await request.json()
+        target_repo = data.get("repo")
+        error_stack = data.get("error_stack")
+
+        if not target_repo or not error_stack:
+            return JSONResponse({"status": "error", "message": "repo and error_stack are required"}, status_code=400)
+
+        import sqlite3
+        import os
+        import uuid
+        db_path = os.path.join(os.path.dirname(__file__), 'dev.db')
+        task_id = f"hotfix-{uuid.uuid4().hex[:8]}"
+
+        prompt = f"[URGENT HOTFIX] Production crash detected. Fix this stack trace immediately:\n\n{error_stack}"
+
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+
+        # We forge the created_at to be heavily in the past so it jumps to the front of the queue
+        cursor.execute("""
+            INSERT INTO DevHouseQueue (id, prompt, target_repo, model, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, 'pending', '1970-01-01 00:00:00', datetime('now'))
+        """, (task_id, prompt, target_repo, "Pro"))
+        conn.commit()
+        conn.close()
+
+        background_tasks.add_task(queue_runner_loop)
+        return {"status": "success", "message": "P0 Hotfix injected successfully.", "task_id": task_id}
+
+    except Exception as e:
+        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
 
 @app.post("/api/devhouse/queue")
 async def api_devhouse_queue(request: Request, background_tasks: BackgroundTasks):
