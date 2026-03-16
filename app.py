@@ -540,7 +540,30 @@ async def api_devhouse_review(request: Request):
 devhouse_lock = asyncio.Lock()
 devhouse_queue = asyncio.Queue()
 
-async def run_devhouse_autopilot(initial_prompt, kb_links, model_type, max_iterations=5):
+def init_devhouse_queue_db():
+    import sqlite3
+    import os
+    db_path = os.path.join(os.path.dirname(__file__), 'dev.db')
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS DevHouseQueue (
+            id TEXT PRIMARY KEY,
+            prompt TEXT,
+            kb_links TEXT,
+            model TEXT,
+            webhook_url TEXT,
+            status TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+init_devhouse_queue_db()
+
+async def run_devhouse_autopilot(task_id, initial_prompt, kb_links, model_type, max_iterations=5):
     import datetime
     import time
     import google.generativeai as genai
@@ -590,59 +613,44 @@ async def run_devhouse_autopilot(initial_prompt, kb_links, model_type, max_itera
             except Exception as e:
                 logging.error(f"Failed to save DevHouse state: {e}")
 
-        # Check if we should resume
-        try:
-             db_path = os.path.join(os.path.dirname(__file__), 'dev.db')
-             conn = sqlite3.connect(db_path)
-             cursor = conn.cursor()
-             # We just query, if table doesn't exist, we skip resume
-             cursor.execute("SELECT branch, iteration, max_iterations, accumulated_context, status FROM DevHouseState WHERE id = 'active'")
-             row = cursor.fetchone()
-             if row and row[4] == 'running':
-                 branch_name = row[0]
-                 start_iteration = row[1]
-                 max_iterations = row[2]
-                 accumulated_context = row[3]
-                 await devhouse_queue.put({"type": "info", "message": f"[PM] Resuming DevHouse run from DB state on iteration {start_iteration}..."})
+        start_iteration = 1
+        create_feature_branch("main", branch_name)
+        save_state(1, accumulated_context, 'running')
 
-                 # Restore jules_instruction from accumulated context (the last block of text is the latest instruction)
-                 jules_instruction = f"Task: {initial_prompt}\nKnowledge Base: {kb_links}\nBranch: {branch_name}\n\nResuming previous instruction set from crashed state."
-                 if "Review (Iter" in accumulated_context:
-                      parts = accumulated_context.split("Review (Iter")
-                      latest_review = parts[-1]
-                      jules_instruction = f"Code Review Feedback:\n{latest_review}\n\nPlease fix these issues."
-             else:
-                 start_iteration = 1
-                 create_feature_branch("main", branch_name)
-                 save_state(1, accumulated_context, 'running')
-             conn.close()
-        except sqlite3.OperationalError:
-             start_iteration = 1
-             create_feature_branch("main", branch_name)
-             save_state(1, accumulated_context, 'running')
+        empty_diff_count = 0
 
         for iteration in range(start_iteration, max_iterations + 1):
             await devhouse_queue.put({"type": "info", "message": f"[DEV] Iteration {iteration}/{max_iterations}: Sending instructions to Jules..."})
             save_state(iteration, accumulated_context, 'running')
 
-            # Step A: Send task to Jules
-            await jules_bot.send_task(jules_page, "https://jules.dev", jules_instruction)
+            # 15-Minute Watchdog Wrappers
+            try:
+                # Step A: Send task to Jules
+                await asyncio.wait_for(jules_bot.send_task(jules_page, "https://jules.dev", jules_instruction), timeout=900)
 
-            # Step B: Wait for Jules to finish
-            await devhouse_queue.put({"type": "info", "message": f"[DEV] Iteration {iteration}/{max_iterations}: Writing code... Waiting for 'Ready for Review'."})
+                # Step B: Wait for Jules to finish
+                await devhouse_queue.put({"type": "info", "message": f"[DEV] Iteration {iteration}/{max_iterations}: Writing code... Waiting for 'Ready for Review'."})
 
-            # 30-second monitoring loop
-            jules_status = ""
-            max_polls = 60 # 60 * 30s = 30 mins
-            for poll in range(max_polls):
-                status_res = await jules_bot.poll_for_completion(jules_page, stream_queue=devhouse_queue, step_id="autopilot", interval_seconds=30)
-                if "Ready for review" in status_res or "Jules finished" in status_res:
-                     jules_status = status_res
-                     break
-                await asyncio.sleep(30)
+                # 30-second monitoring loop
+                jules_status = ""
+                max_polls = 60 # 60 * 30s = 30 mins
+                for poll in range(max_polls):
+                    status_res = await asyncio.wait_for(jules_bot.poll_for_completion(jules_page, stream_queue=devhouse_queue, step_id="autopilot", interval_seconds=30), timeout=900)
+                    if "Ready for review" in status_res or "Jules finished" in status_res:
+                         jules_status = status_res
+                         break
+                    await asyncio.sleep(30)
 
-            if not jules_status:
-                raise Exception("Timeout waiting for Jules to finish task.")
+                if not jules_status:
+                    raise Exception("Timeout waiting for Jules to finish task.")
+
+            except asyncio.TimeoutError:
+                await devhouse_queue.put({"type": "error", "message": f"[WATCHDOG] Process hung for 15 minutes, hard resetting Jules browser..."})
+                logging.error("[WATCHDOG] Process hung, hard resetting...")
+                await jules_bot.quit()
+                jules_bot = bot.JulesBot(profile_id="1")
+                jules_page = await jules_bot.create_new_page()
+                continue # Retry this iteration
 
             await devhouse_queue.put({"type": "action", "message": f"[GIT] Code pushed by Jules. Fetching diff for branch '{branch_name}'..."})
 
@@ -650,8 +658,14 @@ async def run_devhouse_autopilot(initial_prompt, kb_links, model_type, max_itera
             diff = get_branch_diff("main", branch_name)
 
             if not diff.strip():
-                await devhouse_queue.put({"type": "info", "message": f"[PM] No changes detected in diff. Jules might have failed."})
-                break
+                empty_diff_count += 1
+                await devhouse_queue.put({"type": "info", "message": f"[SYSTEM WARNING] No code changes detected. Attempt {empty_diff_count}/2."})
+                if empty_diff_count >= 2:
+                    raise Exception("Jules failed to push code twice.")
+                jules_instruction = "You failed to commit any code. You must implement the changes and push."
+                continue
+
+            empty_diff_count = 0 # Reset on success
 
             # Step D: Gemini Code Review
             await devhouse_queue.put({"type": "action", "message": f"[PM] Reviewing Diff: Analyzing code changes..."})
@@ -689,36 +703,146 @@ async def run_devhouse_autopilot(initial_prompt, kb_links, model_type, max_itera
     except Exception as e:
         save_state(1, str(e), 'failed')
         await devhouse_queue.put({"type": "error", "message": f"[ERROR] DevHouse Autopilot crashed: {str(e)}"})
+        raise e
     finally:
         if jules_bot:
             await jules_bot.quit()
 
-@app.post("/api/devhouse/start")
-async def api_devhouse_start(request: Request, background_tasks: BackgroundTasks):
-    if devhouse_lock.locked():
-         return JSONResponse({"status": "error", "message": "A DevHouse Autopilot loop is already running."}, status_code=409)
+queue_running = False
 
+async def queue_runner_loop():
+    global queue_running
+    if queue_running:
+        return
+    queue_running = True
+
+    import sqlite3
+    import os
+    import httpx
+    db_path = os.path.join(os.path.dirname(__file__), 'dev.db')
+
+    while True:
+        try:
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+            cursor.execute("SELECT id, prompt, kb_links, model, webhook_url FROM DevHouseQueue WHERE status = 'pending' ORDER BY created_at ASC LIMIT 1")
+            row = cursor.fetchone()
+            if not row:
+                # No pending tasks, check if we need to send morning report
+                cursor.execute("SELECT COUNT(*) FROM DevHouseQueue WHERE status = 'completed'")
+                completed_count = cursor.fetchone()[0]
+                cursor.execute("SELECT COUNT(*) FROM DevHouseQueue WHERE status = 'failed'")
+                failed_count = cursor.fetchone()[0]
+
+                # Check for webhook
+                cursor.execute("SELECT webhook_url FROM DevHouseQueue WHERE webhook_url IS NOT NULL AND webhook_url != '' LIMIT 1")
+                webhook_row = cursor.fetchone()
+
+                if webhook_row and (completed_count > 0 or failed_count > 0):
+                    webhook_url = webhook_row[0]
+                    try:
+                         # Fetch details for the report
+                         cursor.execute("SELECT id, prompt, status FROM DevHouseQueue")
+                         details = [{"id": r[0], "prompt": r[1], "status": r[2]} for r in cursor.fetchall()]
+
+                         payload = {
+                             "total_completed": completed_count,
+                             "total_failed": failed_count,
+                             "details": details
+                         }
+
+                         async with httpx.AsyncClient(timeout=10.0) as client:
+                              await client.post(webhook_url, json=payload)
+
+                         # To avoid spamming on next idle loop, clear the webhook URL from completed/failed tasks
+                         cursor.execute("UPDATE DevHouseQueue SET webhook_url = NULL")
+                         conn.commit()
+                    except Exception as e:
+                         logging.error(f"Failed to send Morning Report webhook: {e}")
+
+                conn.close()
+                queue_running = False
+                break
+
+            task_id, prompt, kb_links, model, webhook_url = row
+            cursor.execute("UPDATE DevHouseQueue SET status = 'running', updated_at = datetime('now') WHERE id = ?", (task_id,))
+            conn.commit()
+            conn.close()
+
+            async with devhouse_lock:
+                 # Clear old queue messages before starting a new task
+                 while not devhouse_queue.empty():
+                      try:
+                          devhouse_queue.get_nowait()
+                      except asyncio.QueueEmpty:
+                          break
+                 await devhouse_queue.put({"type": "info", "message": f"[QUEUE] Starting task {task_id}..."})
+
+                 success = False
+                 try:
+                      await run_devhouse_autopilot(task_id, prompt, kb_links, model)
+                      success = True
+                 except Exception as e:
+                      logging.error(f"Task {task_id} failed: {e}")
+
+                 conn = sqlite3.connect(db_path)
+                 cursor = conn.cursor()
+                 new_status = 'completed' if success else 'failed'
+                 cursor.execute("UPDATE DevHouseQueue SET status = ?, updated_at = datetime('now') WHERE id = ?", (new_status, task_id))
+                 conn.commit()
+                 conn.close()
+
+        except Exception as e:
+            logging.error(f"Queue runner error: {e}")
+            await asyncio.sleep(5)
+
+@app.post("/api/devhouse/queue")
+async def api_devhouse_queue(request: Request, background_tasks: BackgroundTasks):
     data = await request.json()
     prompt = data.get("prompt")
     kb_links = data.get("kbLinks", "")
     model = data.get("model", "Pro")
+    webhook_url = data.get("webhookUrl", "")
 
     if not prompt:
         return JSONResponse({"status": "error", "message": "prompt is required"}, status_code=400)
 
-    async def task_wrapper():
-        async with devhouse_lock:
-            # Clear old queue messages before starting
-            while not devhouse_queue.empty():
-                 try:
-                     devhouse_queue.get_nowait()
-                 except asyncio.QueueEmpty:
-                     break
-            await run_devhouse_autopilot(prompt, kb_links, model)
-            await devhouse_queue.put("__DONE__")
+    import sqlite3
+    import os
+    import uuid
+    db_path = os.path.join(os.path.dirname(__file__), 'dev.db')
+    task_id = str(uuid.uuid4())
 
-    background_tasks.add_task(task_wrapper)
-    return {"status": "success", "message": "Started Auto-Dev loop in the background."}
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO DevHouseQueue (id, prompt, kb_links, model, webhook_url, status)
+            VALUES (?, ?, ?, ?, ?, 'pending')
+        """, (task_id, prompt, kb_links, model, webhook_url))
+        conn.commit()
+        conn.close()
+
+        background_tasks.add_task(queue_runner_loop)
+        return {"status": "success", "message": "Task added to queue.", "task_id": task_id}
+    except Exception as e:
+        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+
+@app.get("/api/devhouse/queue")
+async def get_devhouse_queue():
+    import sqlite3
+    import os
+    db_path = os.path.join(os.path.dirname(__file__), 'dev.db')
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM DevHouseQueue ORDER BY created_at DESC")
+        rows = [dict(row) for row in cursor.fetchall()]
+        conn.close()
+        return {"status": "success", "queue": rows}
+    except Exception as e:
+        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
 
 @app.get("/api/devhouse/logs")
 async def stream_devhouse_logs():

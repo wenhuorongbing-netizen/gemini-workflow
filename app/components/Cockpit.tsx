@@ -10,14 +10,32 @@ export default function Cockpit() {
     const [isReviewing, setIsReviewing] = useState(false);
     const [kbLinks, setKbLinks] = useState("");
     const [model, setModel] = useState("Pro");
+    const [webhookUrl, setWebhookUrl] = useState("");
     const [isStarting, setIsStarting] = useState(false);
 
     const [activeBranch, setActiveBranch] = useState<string | null>(null);
     const [iteration, setIteration] = useState(1);
     const [maxIterations] = useState(5);
     const [logs, setLogs] = useState<{message: string, type: "info"|"action"|"error"|"review"}[]>([]);
+    const [queue, setQueue] = useState<any[]>([]);
 
     const [isMerging, setIsMerging] = useState(false);
+
+    const fetchQueue = async () => {
+        try {
+            const res = await fetch("/api/devhouse/queue");
+            if (res.ok) {
+                const data = await res.json();
+                setQueue(data.queue || []);
+            }
+        } catch(e) {}
+    };
+
+    useEffect(() => {
+        fetchQueue();
+        const interval = setInterval(fetchQueue, 5000);
+        return () => clearInterval(interval);
+    }, []);
 
     const scrollToBottom = () => {
         messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -65,26 +83,29 @@ export default function Cockpit() {
         setLogs(prev => [...prev, { message: msg, type }]);
     };
 
-    const handleStart = async () => {
+    const handleAddToQueue = async () => {
         if (!prompt.trim()) {
             alert("Please enter an initial prompt.");
             return;
         }
         setIsStarting(true);
-        setLogs([]);
         try {
-            const res = await fetch("/api/devhouse/start", {
+            const res = await fetch("/api/devhouse/queue", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ prompt, kbLinks, model })
+                body: JSON.stringify({ prompt, kbLinks, model, webhookUrl })
             });
             const data = await res.json();
             if (!res.ok || data.status !== "success") {
-                addLog(`Failed to start: ${data.error || data.message}`, "error");
-                setIsStarting(false);
+                addLog(`Failed to add to queue: ${data.error || data.message}`, "error");
+            } else {
+                setPrompt("");
+                setKbLinks("");
+                fetchQueue();
             }
         } catch (error: any) {
             addLog(`Error connecting to backend: ${error.message}`, "error");
+        } finally {
             setIsStarting(false);
         }
     };
@@ -183,14 +204,46 @@ export default function Cockpit() {
                     </select>
                 </div>
 
+                <div>
+                    <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Webhook URL (Morning Report)</label>
+                    <input
+                        type="url"
+                        value={webhookUrl}
+                        onChange={(e) => setWebhookUrl(e.target.value)}
+                        placeholder="https://hooks.zapier.com/..."
+                        className="w-full p-2 border border-slate-300 rounded focus:ring-2 focus:ring-blue-500 focus:outline-none text-sm"
+                    />
+                </div>
+
                 <button
-                    onClick={handleStart}
-                    disabled={isStarting || activeBranch !== null}
-                    className="mt-4 w-full bg-blue-600 hover:bg-blue-700 disabled:bg-blue-300 text-white font-bold py-3 rounded shadow transition-all flex items-center justify-center gap-2"
+                    onClick={handleAddToQueue}
+                    disabled={isStarting}
+                    className="mt-2 w-full bg-blue-600 hover:bg-blue-700 disabled:bg-blue-300 text-white font-bold py-2 rounded shadow transition-all flex items-center justify-center gap-2 text-sm"
                 >
-                    {isStarting ? <Loader2 size={18} className="animate-spin" /> : <Play size={18} />}
-                    {activeBranch ? "Auto-Dev Running..." : "Start Auto-Dev"}
+                    {isStarting ? <Loader2 size={16} className="animate-spin" /> : <Play size={16} />}
+                    Add to Queue
                 </button>
+
+                <div className="mt-4 flex-1 flex flex-col min-h-0">
+                     <h3 className="text-xs font-bold text-slate-700 uppercase mb-2 border-b border-slate-200 pb-1">Fleet Task Queue</h3>
+                     <div className="flex-1 overflow-y-auto space-y-2 pr-1">
+                          {queue.length === 0 ? (
+                              <div className="text-xs text-slate-400 italic">Queue is empty.</div>
+                          ) : (
+                              queue.map((task: any) => (
+                                  <div key={task.id} className={`p-2 rounded border text-xs ${task.status === 'running' ? 'border-blue-500 bg-blue-50' : task.status === 'completed' ? 'border-emerald-300 bg-emerald-50' : task.status === 'failed' ? 'border-rose-300 bg-rose-50' : 'border-slate-200 bg-slate-50'}`}>
+                                      <div className="flex justify-between items-start mb-1">
+                                          <span className="font-bold text-slate-700 truncate mr-2" title={task.id}>ID: {task.id.split('-')[0]}...</span>
+                                          <span className={`font-bold capitalize ${task.status === 'running' ? 'text-blue-600' : task.status === 'completed' ? 'text-emerald-600' : task.status === 'failed' ? 'text-rose-600' : 'text-slate-500'}`}>
+                                              {task.status}
+                                          </span>
+                                      </div>
+                                      <div className="text-slate-600 truncate" title={task.prompt}>{task.prompt}</div>
+                                  </div>
+                              ))
+                          )}
+                     </div>
+                </div>
             </div>
 
             {/* Center: Orchestration Feed */}

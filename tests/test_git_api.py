@@ -22,19 +22,21 @@ def test_get_devhouse_diff(mock_get_branch_diff):
     assert "File: main.py" in data["diff"]
     mock_get_branch_diff.assert_called_once_with("main", "feature-branch")
 
-@patch('app.run_devhouse_autopilot')
-def test_post_devhouse_start(mock_run_autopilot):
+def test_post_devhouse_queue():
     payload = {
         "prompt": "Build a new header component.",
         "kbLinks": "https://docs.github.com",
-        "model": "Pro"
+        "model": "Pro",
+        "webhookUrl": "http://example.com/hook"
     }
 
-    response = client.post("/api/devhouse/start", json=payload)
+    # Use queue endpoint since /start is replaced by /queue
+    response = client.post("/api/devhouse/queue", json=payload)
 
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == "success"
+    assert "task_id" in data
 
 @patch('app.merge_and_delete_branch')
 def test_post_devhouse_merge(mock_merge_and_delete_branch):
