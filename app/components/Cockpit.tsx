@@ -16,7 +16,7 @@ export default function Cockpit() {
     const [activeBranch, setActiveBranch] = useState<string | null>(null);
     const [iteration, setIteration] = useState(1);
     const [maxIterations] = useState(5);
-    const [logs, setLogs] = useState<{message: string, type: "info"|"action"|"error"|"review"}[]>([]);
+    const [logs, setLogs] = useState<{message: string, type: "info"|"action"|"error"|"review"|"ci"|"ci_failed"|"ci_success"}[]>([]);
     const [queue, setQueue] = useState<any[]>([]);
 
     const [isMerging, setIsMerging] = useState(false);
@@ -79,7 +79,7 @@ export default function Cockpit() {
         return () => eventSource.close();
     }, []);
 
-    const addLog = (msg: string, type: "info"|"action"|"error"|"review" = "info") => {
+    const addLog = (msg: string, type: "info"|"action"|"error"|"review"|"ci"|"ci_failed"|"ci_success" = "info") => {
         setLogs(prev => [...prev, { message: msg, type }]);
     };
 
@@ -265,7 +265,14 @@ export default function Cockpit() {
                     ) : (
                         logs.map((log, idx) => (
                             <div key={idx} className="border-b border-slate-800 pb-4 last:border-0">
-                                <div className={`font-bold mb-1 ${log.type === 'error' ? 'text-rose-500' : log.type === 'action' ? 'text-blue-400' : log.type === 'review' ? 'text-purple-400' : 'text-emerald-400'}`}>
+                                <div className={`font-bold mb-1 ${
+                                    log.type === 'error' || log.type === 'ci_failed' ? 'text-rose-500' :
+                                    log.type === 'action' ? 'text-blue-400' :
+                                    log.type === 'review' ? 'text-purple-400' :
+                                    log.type === 'ci' ? 'text-amber-500' :
+                                    log.type === 'ci_success' ? 'text-emerald-400' :
+                                    'text-emerald-400'
+                                }`}>
                                     [{new Date().toLocaleTimeString()}] {log.type === 'error' && "ERROR"} {log.type === 'review' && "GEMINI REVIEW"}
                                 </div>
                                 {log.type === 'review' ? (

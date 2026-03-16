@@ -373,6 +373,51 @@ def setup_watchers(loop=None):
 
 @app.on_event("startup")
 async def startup_event():
+    import glob
+    import os
+
+    # Brutal Repository Cleanup (Task 1)
+    cleanup_patterns = ['patch_*.py', '*_verification.png', 'dev.db']
+    for pattern in cleanup_patterns:
+        for filepath in glob.glob(pattern):
+            try:
+                os.remove(filepath)
+                logging.info(f"Cleanup: Deleted {filepath}")
+            except Exception as e:
+                logging.error(f"Cleanup: Failed to delete {filepath} - {e}")
+
+    # Reinitialize dev.db explicitly after deleting it
+    import sqlite3
+    db_path = os.path.join(os.path.dirname(__file__), 'dev.db')
+    if not os.path.exists(db_path):
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS DevHouseQueue (
+                id TEXT PRIMARY KEY,
+                prompt TEXT,
+                kb_links TEXT,
+                model TEXT,
+                webhook_url TEXT,
+                status TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                completed_at DATETIME
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS DevHouseState (
+                id TEXT PRIMARY KEY,
+                branch TEXT,
+                iteration INTEGER,
+                max_iterations INTEGER,
+                accumulated_context TEXT,
+                status TEXT,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        conn.commit()
+        conn.close()
+
     global bot_semaphore
     global cancel_event
     bot_semaphore = asyncio.Semaphore(3)
@@ -619,7 +664,11 @@ async def run_devhouse_autopilot(task_id, initial_prompt, kb_links, model_type, 
 
         empty_diff_count = 0
 
-        for iteration in range(start_iteration, max_iterations + 1):
+        iteration = start_iteration
+        max_fix_iterations = 3
+        fix_count = 0
+
+        while iteration <= max_iterations:
             await devhouse_queue.put({"type": "info", "message": f"[DEV] Iteration {iteration}/{max_iterations}: Sending instructions to Jules..."})
             save_state(iteration, accumulated_context, 'running')
 
@@ -667,6 +716,53 @@ async def run_devhouse_autopilot(task_id, initial_prompt, kb_links, model_type, 
 
             empty_diff_count = 0 # Reset on success
 
+            # The Local CI Oracle Phase
+            await devhouse_queue.put({"type": "ci", "message": "[CI] Compiling project... (npm run build)"})
+            import asyncio
+            try:
+                 ci_process = await asyncio.create_subprocess_exec(
+                      "npm", "run", "build",
+                      stdout=asyncio.subprocess.PIPE,
+                      stderr=asyncio.subprocess.PIPE
+                 )
+
+                 try:
+                      stdout_bytes, stderr_bytes = await asyncio.wait_for(ci_process.communicate(), timeout=120.0)
+                 except asyncio.TimeoutError:
+                      try:
+                          ci_process.kill()
+                      except OSError:
+                          pass
+                      await ci_process.communicate()
+                      await devhouse_queue.put({"type": "ci_failed", "message": "[CI] ❌ Build Timeout (120s)! Sending failure back to Developer."})
+                      jules_instruction = f"[SYSTEM CI ALERT] The code you just wrote caused a build timeout (exceeded 120 seconds). Fix any infinite loops or build hang issues."
+
+                      fix_count += 1
+                      if fix_count > max_fix_iterations:
+                          raise Exception("Jules failed to fix CI errors after 3 attempts.")
+                      continue
+
+                 returncode = ci_process.returncode
+                 if returncode != 0:
+                      await devhouse_queue.put({"type": "ci_failed", "message": "[CI] ❌ Build Failed! Sending stack trace back to Developer."})
+
+                      stderr = stderr_bytes.decode()
+                      stdout_str = stdout_bytes.decode()
+                      stdout_lines = "\n".join(stdout_str.splitlines()[-50:]) if stdout_str else ""
+
+                      jules_instruction = f"[SYSTEM CI ALERT] The code you just wrote caused a build failure. Do NOT write new features. Fix the compilation errors immediately based on this stack trace:\n\nSTDERR:\n{stderr}\n\nSTDOUT (Last 50 lines):\n{stdout_lines}"
+
+                      fix_count += 1
+                      if fix_count > max_fix_iterations:
+                          raise Exception("Jules failed to fix CI errors after 3 attempts.")
+                      continue # Re-run the iteration without incrementing counter
+                 else:
+                      fix_count = 0
+                      await devhouse_queue.put({"type": "ci_success", "message": "[CI] ✅ Build Passed! Proceeding to PM Review."})
+            except Exception as e:
+                 await devhouse_queue.put({"type": "error", "message": f"[CI] ❌ Unknown Execution Error: {e}"})
+                 raise e
+
             # Step D: Gemini Code Review
             await devhouse_queue.put({"type": "action", "message": f"[PM] Reviewing Diff: Analyzing code changes..."})
 
@@ -691,6 +787,8 @@ async def run_devhouse_autopilot(task_id, initial_prompt, kb_links, model_type, 
 
             # Step E: Feed feedback back to Jules
             jules_instruction = f"Code Review Feedback:\n{review_text}\n\nPlease fix these issues."
+
+            iteration += 1
 
         # End of Loop - Auto-Merge
         await devhouse_queue.put({"type": "action", "message": f"[GIT] DevHouse loop finished. Merging branch '{branch_name}' and cleaning up."})
