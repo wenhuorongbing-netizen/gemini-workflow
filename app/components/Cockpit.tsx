@@ -17,9 +17,11 @@ export default function Cockpit() {
     const [activeBranch, setActiveBranch] = useState<string | null>(null);
     const [iteration, setIteration] = useState(1);
     const [maxIterations] = useState(5);
-    const [logs, setLogs] = useState<{message: string, type: "info"|"action"|"error"|"review"|"ci"|"ci_failed"|"ci_success"}[]>([]);
+    const [logs, setLogs] = useState<{message: string, type: "info"|"action"|"error"|"review"|"ci"|"ci_failed"|"ci_success"|"preview"|"success"}[]>([]);
     const [queue, setQueue] = useState<any[]>([]);
     const [isRadarActive, setIsRadarActive] = useState(false);
+    const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+    const [isUatPending, setIsUatPending] = useState(false);
 
     const [isMerging, setIsMerging] = useState(false);
 
@@ -58,6 +60,13 @@ export default function Cockpit() {
                 const data = JSON.parse(e.data);
                 if (data.type) {
                      setLogs(prev => [...prev, data]);
+                     if (data.type === 'preview' && data.url) {
+                         setPreviewUrl(data.url);
+                         setIsUatPending(true);
+                     }
+                     if (data.type === 'success' || data.type === 'error') {
+                         setIsUatPending(false);
+                     }
                 }
 
                 // Light state inference from logs (optional enhancement)
@@ -81,7 +90,7 @@ export default function Cockpit() {
         return () => eventSource.close();
     }, []);
 
-    const addLog = (msg: string, type: "info"|"action"|"error"|"review"|"ci"|"ci_failed"|"ci_success" = "info") => {
+    const addLog = (msg: string, type: "info"|"action"|"error"|"review"|"ci"|"ci_failed"|"ci_success"|"preview"|"success" = "info") => {
         setLogs(prev => [...prev, { message: msg, type }]);
     };
 
@@ -114,6 +123,20 @@ export default function Cockpit() {
             addLog(`Error connecting to backend: ${error.message}`, "error");
         } finally {
             setIsStarting(false);
+        }
+    };
+
+    const handleUatDecision = async (approved: boolean) => {
+        try {
+            await fetch("/api/devhouse/uat_response", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ approved })
+            });
+            setIsUatPending(false);
+            setPreviewUrl(null);
+        } catch(e) {
+            console.error("Failed to send UAT response");
         }
     };
 
@@ -269,6 +292,37 @@ export default function Cockpit() {
 
             {/* Center: Orchestration Feed */}
             <div className="flex-1 p-6 flex flex-col bg-slate-50 relative">
+
+                {isUatPending && previewUrl && (
+                    <div className="absolute inset-0 bg-slate-900/90 z-50 flex flex-col p-4 m-6 rounded-lg backdrop-blur-sm shadow-2xl overflow-hidden border border-slate-700">
+                        <div className="flex justify-between items-center mb-4 shrink-0">
+                            <h2 className="text-xl font-bold text-white flex items-center gap-2">
+                                <span className="animate-pulse w-3 h-3 bg-red-500 rounded-full inline-block"></span>
+                                UAT Live Preview Gate
+                            </h2>
+                            <div className="flex gap-3">
+                                <button
+                                    onClick={() => handleUatDecision(false)}
+                                    className="bg-rose-600 hover:bg-rose-700 text-white font-bold py-1.5 px-4 rounded shadow text-sm transition-colors"
+                                >
+                                    Reject & Fix
+                                </button>
+                                <button
+                                    onClick={() => handleUatDecision(true)}
+                                    className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-1.5 px-4 rounded shadow text-sm transition-colors"
+                                >
+                                    Approve & Merge
+                                </button>
+                            </div>
+                        </div>
+                        <iframe
+                            src={previewUrl}
+                            className="flex-1 w-full bg-white rounded shadow-inner"
+                            title="Live Preview"
+                        />
+                    </div>
+                )}
+
                 <div className="flex items-center justify-between mb-4 border-b border-slate-200 pb-2">
                     <h2 className="text-lg font-bold text-slate-700 flex items-center gap-2">
                         Orchestration Feed

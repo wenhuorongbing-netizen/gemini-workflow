@@ -15,6 +15,22 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from github import Github
 import dotenv
+import glob
+
+# --- PHASE 1: PROGRAMMATIC OS-LEVEL PURGE ---
+def enforce_repository_hygiene():
+    cleanup_patterns = ['patch_*.py', '.jules/bolt.md', 'watch_test_folder', '*.png']
+    for pattern in cleanup_patterns:
+        for filepath in glob.glob(pattern):
+            try:
+                if os.path.isfile(filepath):
+                    os.remove(filepath)
+                elif os.path.isdir(filepath):
+                    os.rmdir(filepath)
+            except Exception:
+                pass
+enforce_repository_hygiene()
+# --------------------------------------------
 
 dotenv.load_dotenv()
 
@@ -503,6 +519,14 @@ async def api_devhouse_diff(compare_branch: str, base_branch: str = "main", targ
     except Exception as e:
         return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
 
+@app.post("/api/devhouse/uat_response")
+async def api_devhouse_uat_response(request: Request):
+    data = await request.json()
+    approved = data.get("approved", False)
+    uat_decision["approved"] = approved
+    uat_approval_event.set()
+    return {"status": "success", "message": f"UAT Decision received: {'Approved' if approved else 'Rejected'}"}
+
 @app.post("/api/devhouse/merge")
 async def api_devhouse_merge(request: Request):
     data = await request.json()
@@ -555,6 +579,10 @@ async def api_devhouse_review(request: Request):
 
 devhouse_lock = asyncio.Lock()
 devhouse_queue = asyncio.Queue()
+
+# --- PHASE 2: UAT GATE EVENT ---
+uat_approval_event = asyncio.Event()
+uat_decision = {"approved": False}
 
 def init_devhouse_queue_db():
     import sqlite3
@@ -859,6 +887,43 @@ async def run_devhouse_autopilot(task_id, initial_prompt, target_repo, kb_links,
             except Exception as e:
                  await devhouse_queue.put({"type": "error", "message": f"[CI] ❌ Unknown Execution Error: {e}"})
                  raise e
+
+            # Phase 2: Live Preview Engine & UAT Gate
+            await devhouse_queue.put({"type": "info", "message": "[SYSTEM] Spinning up Live Preview Engine (npm run dev)..."})
+            preview_process = None
+            try:
+                preview_process = await asyncio.create_subprocess_exec(
+                    "npm", "run", "dev", "--", "-p", "3005",
+                    cwd=workspace_dir,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL
+                )
+
+                # Give the dev server a few seconds to bind
+                await asyncio.sleep(5)
+                await devhouse_queue.put({
+                    "type": "preview",
+                    "message": "Live Preview Ready. Awaiting UAT Approval...",
+                    "url": "http://localhost:3005"
+                })
+
+                # Halt orchestration loop until human approves
+                uat_approval_event.clear()
+                await uat_approval_event.wait()
+
+                if not uat_decision.get("approved", False):
+                     await devhouse_queue.put({"type": "error", "message": "[UAT] Human rejected changes. Resetting to Jules."})
+                     jules_instruction = f"[UAT ALERT] The human product manager REJECTED your latest changes in the UI preview. Fix the visual layout or feature based on the original request."
+                     continue
+
+                await devhouse_queue.put({"type": "success", "message": "[UAT] Human approved changes. Proceeding to final Code Review."})
+            finally:
+                if preview_process:
+                     try:
+                         preview_process.kill()
+                         await preview_process.communicate()
+                     except Exception:
+                         pass
 
             # Step D: Gemini Code Review
             await devhouse_queue.put({"type": "action", "message": f"[PM] Reviewing Diff: Analyzing code changes..."})
