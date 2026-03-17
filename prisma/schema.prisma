@@ -54,6 +54,7 @@ model RunHistory {
   results      String   // JSON string of explicit Node ID results map
   nodes        String?
   edges        String?
+  agentState   String   @default("PLANNING") // e.g., PLANNING, CODING, QA_AUDIT, SECOPS_AUDIT, UAT_GATE, DEPLOYED, FAILED
   createdAt    DateTime @default(now())
 }
 

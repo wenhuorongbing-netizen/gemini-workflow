@@ -605,6 +605,22 @@ def init_devhouse_queue_db():
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    try:
+        cursor.execute("ALTER TABLE DevHouseQueue ADD COLUMN agent_state TEXT DEFAULT 'PLANNING'")
+    except sqlite3.OperationalError:
+        pass # Column already exists
+
+    # Also we want to track the overall loop state persistence (e.g. jules context, iterations)
+    try:
+        cursor.execute("ALTER TABLE DevHouseQueue ADD COLUMN accumulated_context TEXT DEFAULT ''")
+    except sqlite3.OperationalError:
+        pass
+
+    try:
+        cursor.execute("ALTER TABLE DevHouseQueue ADD COLUMN iteration INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
+
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS CorporateMemory (
             id TEXT PRIMARY KEY,
@@ -687,7 +703,7 @@ def index_repository(repo_path, prompt):
 
     return radar_report
 
-async def run_devhouse_autopilot(task_id, initial_prompt, target_repo, kb_links, model_type, max_iterations=5):
+async def run_devhouse_autopilot(task_id, initial_prompt, attachments, target_repo, kb_links, model_type, max_iterations=5):
     import datetime
     import time
     import google.generativeai as genai
@@ -763,7 +779,7 @@ async def run_devhouse_autopilot(task_id, initial_prompt, target_repo, kb_links,
         except Exception as e:
             logging.warning(f"Failed to load corporate memory: {e}")
 
-        initial_spec, spec_tokens = pm_agent.generate_initial_spec(initial_prompt, radar_report, kb_links, corporate_memory=corporate_memory_context)
+        initial_spec, spec_tokens = pm_agent.generate_initial_spec(initial_prompt, radar_report, kb_links, corporate_memory=corporate_memory_context, attachments=attachments)
         pm_tokens_burned += spec_tokens
 
         await devhouse_queue.put({"type": "action", "message": f"[DEV] Spawning Jules..."})
@@ -778,6 +794,18 @@ async def run_devhouse_autopilot(task_id, initial_prompt, target_repo, kb_links,
         accumulated_context = jules_instruction
         import sqlite3
         import os
+
+        async def update_agent_state(state: str):
+            try:
+                db_path = os.path.join(os.path.dirname(__file__), 'dev.db')
+                conn = sqlite3.connect(db_path)
+                cursor = conn.cursor()
+                cursor.execute("UPDATE DevHouseQueue SET agent_state = ?, updated_at = datetime('now') WHERE id = ?", (state, task_id))
+                conn.commit()
+                conn.close()
+                await devhouse_queue.put({"type": "state_change", "newState": state})
+            except Exception as e:
+                logging.error(f"Failed to update agent state: {e}")
 
         def save_state(count, ctx, status):
             try:
@@ -799,14 +827,40 @@ async def run_devhouse_autopilot(task_id, initial_prompt, target_repo, kb_links,
                     INSERT OR REPLACE INTO DevHouseState (id, branch, iteration, max_iterations, accumulated_context, status, updatedAt)
                     VALUES ('active', ?, ?, ?, ?, ?, datetime('now'))
                 """, (branch_name, count, max_iterations, ctx, status))
+                cursor.execute("UPDATE DevHouseQueue SET accumulated_context = ?, iteration = ? WHERE id = ?", (ctx, count, task_id))
                 conn.commit()
                 conn.close()
             except Exception as e:
                 logging.error(f"Failed to save DevHouse state: {e}")
 
         start_iteration = 1
-        create_feature_branch("main", branch_name, target_repo)
-        save_state(1, accumulated_context, 'running')
+
+        # Check if we are resuming from DB
+        try:
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+            cursor.execute("SELECT agent_state, accumulated_context, iteration FROM DevHouseQueue WHERE id = ?", (task_id,))
+            row = cursor.fetchone()
+            conn.close()
+            if row and row[0]:
+                db_state = row[0]
+                if db_state not in ['PLANNING', 'DEPLOYED', 'FAILED'] and row[1]:
+                    await devhouse_queue.put({"type": "info", "message": f"[SYSTEM] Resuming task from state: {db_state}"})
+                    accumulated_context = row[1]
+                    start_iteration = row[2] or 1
+                    jules_instruction = accumulated_context # Restore the active instruction loop
+
+                    if not os.path.exists(workspace_dir):
+                        subprocess.run(["git", "clone", clone_url, workspace_dir], check=True, capture_output=True, text=True)
+                        subprocess.run(["git", "checkout", branch_name], cwd=workspace_dir, check=True)
+        except Exception as e:
+            logging.error(f"Failed to load resume state: {e}")
+
+        if start_iteration == 1 and not os.path.exists(os.path.join(workspace_dir, ".git")):
+             create_feature_branch("main", branch_name, target_repo)
+
+        save_state(start_iteration, accumulated_context, 'running')
+        await update_agent_state("CODING")
 
         empty_diff_count = 0
 
@@ -928,6 +982,7 @@ async def run_devhouse_autopilot(task_id, initial_prompt, target_repo, kb_links,
             # ==========================================
             try:
                 # 1. SecOps Agent Review
+                await update_agent_state("SECOPS_AUDIT")
                 await devhouse_queue.put({"type": "info", "message": f"[SECOPS] 🛡️ SecOps Agent analyzing diff for vulnerabilities..."})
 
                 secops_text, sec_tokens = secops_agent.analyze_diff(latest_diff)
@@ -954,6 +1009,7 @@ async def run_devhouse_autopilot(task_id, initial_prompt, target_repo, kb_links,
                 await devhouse_queue.put({"type": "ci_success", "message": "[SECOPS] ✅ Security check passed."})
 
                 # 2. QA Agent Review & TDD Test Generation
+                await update_agent_state("QA_AUDIT")
                 await devhouse_queue.put({"type": "info", "message": f"[QA] 🧪 QA Agent generating TDD test cases..."})
 
                 test_script_content, qa_tokens = qa_agent.generate_tests(latest_diff)
@@ -1015,6 +1071,7 @@ async def run_devhouse_autopilot(task_id, initial_prompt, target_repo, kb_links,
                  raise e
 
             # Phase 2: Live Preview Engine & UAT Gate
+            await update_agent_state("UAT_GATE")
             await devhouse_queue.put({"type": "info", "message": "[SYSTEM] Spinning up Live Preview Engine (npm run dev)..."})
             preview_process = None
 
@@ -1078,6 +1135,7 @@ async def run_devhouse_autopilot(task_id, initial_prompt, target_repo, kb_links,
                          pass
 
             # Step D: Gemini Code Review
+            await update_agent_state("PM_REVIEW")
             await devhouse_queue.put({"type": "action", "message": f"[PM] Reviewing Diff: Analyzing code changes..."})
 
             review_text, review_tokens = pm_agent.review_diff(latest_diff, accumulated_context)
@@ -1097,6 +1155,7 @@ async def run_devhouse_autopilot(task_id, initial_prompt, target_repo, kb_links,
             iteration += 1
 
         # End of Loop - Auto-Merge
+        await update_agent_state("DEPLOYED")
         await devhouse_queue.put({"type": "action", "message": f"[GIT] DevHouse loop finished. Merging branch '{branch_name}' and cleaning up."})
         save_state(max_iterations, accumulated_context, 'merging')
         merge_and_delete_branch(branch_name, "main", target_repo)
@@ -1118,6 +1177,7 @@ async def run_devhouse_autopilot(task_id, initial_prompt, target_repo, kb_links,
         await devhouse_queue.put({"type": "info", "message": f"[SYSTEM] Merge complete. DevHouse Autopilot cycle finished."})
 
     except Exception as e:
+        await update_agent_state("FAILED")
         save_state(1, str(e), 'failed')
         await devhouse_queue.put({"type": "error", "message": f"[ERROR] DevHouse Autopilot crashed: {str(e)}"})
         raise e
@@ -1142,7 +1202,9 @@ async def queue_runner_loop():
         try:
             conn = sqlite3.connect(db_path)
             cursor = conn.cursor()
-            cursor.execute("SELECT id, prompt, target_repo, kb_links, model, webhook_url FROM DevHouseQueue WHERE status = 'pending' ORDER BY created_at ASC LIMIT 1")
+
+            # Fetch pending tasks, or tasks that were running but the server crashed (not completed/failed)
+            cursor.execute("SELECT id, prompt, target_repo, kb_links, model, webhook_url FROM DevHouseQueue WHERE status IN ('pending', 'running') AND agent_state NOT IN ('DEPLOYED', 'FAILED') ORDER BY created_at ASC LIMIT 1")
             row = cursor.fetchone()
             if not row:
                 # No pending tasks, check if we need to send morning report
@@ -1181,7 +1243,21 @@ async def queue_runner_loop():
                 queue_running = False
                 break
 
-            task_id, prompt, target_repo, kb_links, model, webhook_url = row
+
+            task_id, prompt_data, target_repo, kb_links, model, webhook_url = row
+            try:
+                import json
+                parsed_prompt = json.loads(prompt_data)
+                if isinstance(parsed_prompt, dict):
+                    actual_prompt = parsed_prompt.get('prompt', '')
+                    attachments = parsed_prompt.get('attachments', [])
+                else:
+                    actual_prompt = prompt_data
+                    attachments = []
+            except Exception:
+                actual_prompt = prompt_data
+                attachments = []
+
             cursor.execute("UPDATE DevHouseQueue SET status = 'running', updated_at = datetime('now') WHERE id = ?", (task_id,))
             conn.commit()
             conn.close()
@@ -1197,7 +1273,7 @@ async def queue_runner_loop():
 
                  success = False
                  try:
-                      await run_devhouse_autopilot(task_id, prompt, target_repo, kb_links, model)
+                      await run_devhouse_autopilot(task_id, actual_prompt, attachments, target_repo, kb_links, model)
                       success = True
                  except Exception as e:
                       logging.error(f"Task {task_id} failed: {e}")

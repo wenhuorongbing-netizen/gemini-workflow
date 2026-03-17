@@ -13,11 +13,13 @@ export default function Cockpit() {
     const [model, setModel] = useState("Pro");
     const [webhookUrl, setWebhookUrl] = useState("");
     const [isStarting, setIsStarting] = useState(false);
+    const [attachment, setAttachment] = useState<string | null>(null);
+    const [attachmentName, setAttachmentName] = useState<string | null>(null);
 
     const [activeBranch, setActiveBranch] = useState<string | null>(null);
     const [iteration, setIteration] = useState(1);
     const [maxIterations] = useState(5);
-    const [logs, setLogs] = useState<{message: string, type: "info"|"action"|"error"|"review"|"ci"|"ci_failed"|"ci_success"|"preview"|"success"}[]>([]);
+    const [logs, setLogs] = useState<{message: string, type: "info"|"action"|"error"|"review"|"ci"|"ci_failed"|"ci_success"|"preview"|"success"|"state_change"|"finished"|"radar"}[]>([]);
     const [queue, setQueue] = useState<any[]>([]);
     const [isRadarActive, setIsRadarActive] = useState(false);
     const [previewUrl, setPreviewUrl] = useState<string | null>(null);
@@ -51,6 +53,7 @@ export default function Cockpit() {
     }, [logs]);
 
     useEffect(() => {
+
         const eventSource = new EventSource('/api/devhouse/logs');
         eventSource.onmessage = (e) => {
             if(e.data === '"__DONE__"') {
@@ -60,6 +63,18 @@ export default function Cockpit() {
             try {
                 const data = JSON.parse(e.data);
                 if (data.type) {
+                     if (data.type === 'state_change') {
+                          // Real-Time SSE Synchronization: Update Kanban queue item
+                          setQueue(prevQueue => {
+                              const activeTask = prevQueue.find(t => t.status === 'running');
+                              if (activeTask) {
+                                  return prevQueue.map(t => t.id === activeTask.id ? { ...t, agent_state: data.newState } : t);
+                              }
+                              return prevQueue;
+                          });
+                          return; // state_change doesn't need to be in the main logs feed unless we want it
+                     }
+
                      setLogs(prev => [...prev, data]);
                      if (data.type === 'preview' && data.url) {
                          setPreviewUrl(data.url);
@@ -68,9 +83,13 @@ export default function Cockpit() {
                      if (data.type === 'success' || data.type === 'error') {
                          setIsUatPending(false);
                      }
-                }
 
-                // Light state inference from logs (optional enhancement)
+                     // If finished, trigger a queue refetch to move it to Completed
+                     if (data.type === 'finished' || data.type === 'error') {
+                         setTimeout(fetchQueue, 1500);
+                     }
+                }
+// Light state inference from logs (optional enhancement)
                 if (data.message && data.message.includes("Iteration")) {
                     const match = data.message.match(/Iteration (\d+)\/(\d+)/);
                     if (match) {
@@ -91,8 +110,21 @@ export default function Cockpit() {
         return () => eventSource.close();
     }, []);
 
-    const addLog = (msg: string, type: "info"|"action"|"error"|"review"|"ci"|"ci_failed"|"ci_success"|"preview"|"success" = "info") => {
+    const addLog = (msg: string, type: "info"|"action"|"error"|"review"|"ci"|"ci_failed"|"ci_success"|"preview"|"success"|"state_change"|"finished"|"radar" = "info") => {
         setLogs(prev => [...prev, { message: msg, type }]);
+    };
+
+    const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+        const file = e.target.files?.[0];
+        if (file) {
+            setAttachmentName(file.name);
+            const reader = new FileReader();
+            reader.onloadend = () => {
+                const base64String = reader.result as string;
+                setAttachment(base64String);
+            };
+            reader.readAsDataURL(file);
+        }
     };
 
     const handleAddToQueue = async () => {
@@ -109,7 +141,7 @@ export default function Cockpit() {
             const res = await fetch("/api/devhouse/queue", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ prompt, target_repo: targetRepo.trim(), kbLinks, model, webhookUrl })
+                body: JSON.stringify({ prompt, target_repo: targetRepo.trim(), kbLinks, model, webhookUrl, attachments: attachment ? [attachment] : [] })
             });
             const data = await res.json();
             if (!res.ok || data.status !== "success") {
@@ -118,6 +150,10 @@ export default function Cockpit() {
                 setPrompt("");
                 setTargetRepo("");
                 setKbLinks("");
+                setAttachment(null);
+                setAttachmentName(null);
+                setAttachment(null);
+                setAttachmentName(null);
                 fetchQueue();
             }
         } catch (error: any) {
@@ -201,7 +237,8 @@ export default function Cockpit() {
     };
 
     return (
-        <div className="flex h-full w-full bg-slate-50 text-slate-800">
+        <div className="flex flex-col h-full w-full bg-slate-50 text-slate-800">
+            <div className="flex flex-1 h-[60vh] min-h-[400px]">
             {/* Left: Control Panel */}
             <div className="w-1/3 p-6 border-r border-slate-200 flex flex-col gap-4 bg-white shadow-sm z-10">
                 <h2 className="text-lg font-bold flex items-center gap-2 mb-2">
@@ -266,6 +303,36 @@ export default function Cockpit() {
                     />
                 </div>
 
+                <div>
+                    <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">UI Mockup (PNG/JPG)</label>
+                    <div className="flex items-center gap-2">
+                        <label className="cursor-pointer bg-slate-200 hover:bg-slate-300 text-slate-700 font-bold py-2 px-4 rounded shadow-sm text-sm border border-slate-300 flex-1 text-center transition-colors">
+                            📎 {attachmentName || "Upload UI Mockup"}
+                            <input type="file" accept="image/png, image/jpeg" className="hidden" onChange={handleFileUpload} />
+                        </label>
+                        {attachment && (
+                            <button onClick={() => { setAttachment(null); setAttachmentName(null); }} className="text-red-500 hover:text-red-700 px-2" title="Remove attachment">
+                                ✖
+                            </button>
+                        )}
+                    </div>
+                </div>
+
+                <div>
+                    <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">UI Mockup (PNG/JPG)</label>
+                    <div className="flex items-center gap-2">
+                        <label className="cursor-pointer bg-slate-200 hover:bg-slate-300 text-slate-700 font-bold py-2 px-4 rounded shadow-sm text-sm border border-slate-300 flex-1 text-center transition-colors">
+                            📎 {attachmentName || "Upload UI Mockup"}
+                            <input type="file" accept="image/png, image/jpeg" className="hidden" onChange={handleFileUpload} />
+                        </label>
+                        {attachment && (
+                            <button onClick={() => { setAttachment(null); setAttachmentName(null); }} className="text-red-500 hover:text-red-700 px-2" title="Remove attachment">
+                                ✖
+                            </button>
+                        )}
+                    </div>
+                </div>
+
                 <button
                     onClick={handleAddToQueue}
                     disabled={isStarting}
@@ -275,26 +342,7 @@ export default function Cockpit() {
                     Add to Queue
                 </button>
 
-                <div className="mt-4 flex-1 flex flex-col min-h-0">
-                     <h3 className="text-xs font-bold text-slate-700 uppercase mb-2 border-b border-slate-200 pb-1">Fleet Task Queue</h3>
-                     <div className="flex-1 overflow-y-auto space-y-2 pr-1">
-                          {queue.length === 0 ? (
-                              <div className="text-xs text-slate-400 italic">Queue is empty.</div>
-                          ) : (
-                              queue.map((task: any) => (
-                                  <div key={task.id} className={`p-2 rounded border text-xs ${task.status === 'running' ? 'border-blue-500 bg-blue-50' : task.status === 'completed' ? 'border-emerald-300 bg-emerald-50' : task.status === 'failed' ? 'border-rose-300 bg-rose-50' : 'border-slate-200 bg-slate-50'}`}>
-                                      <div className="flex justify-between items-start mb-1">
-                                          <span className="font-bold text-slate-700 truncate mr-2" title={task.id}>ID: {task.id.split('-')[0]}...</span>
-                                          <span className={`font-bold capitalize ${task.status === 'running' ? 'text-blue-600' : task.status === 'completed' ? 'text-emerald-600' : task.status === 'failed' ? 'text-rose-600' : 'text-slate-500'}`}>
-                                              {task.status}
-                                          </span>
-                                      </div>
-                                      <div className="text-slate-600 truncate" title={task.prompt}>{task.prompt}</div>
-                                  </div>
-                              ))
-                          )}
-                     </div>
-                </div>
+                                </div>
             </div>
 
             {/* Center: Orchestration Feed */}
@@ -322,13 +370,43 @@ export default function Cockpit() {
                                 className="w-full p-3 bg-slate-900 border border-slate-600 text-white rounded focus:ring-2 focus:ring-blue-500 focus:outline-none resize-none h-20 text-sm"
                             />
                             <div className="flex gap-4 mt-2">
-                                <button
+                                <div>
+                    <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">UI Mockup (PNG/JPG)</label>
+                    <div className="flex items-center gap-2">
+                        <label className="cursor-pointer bg-slate-200 hover:bg-slate-300 text-slate-700 font-bold py-2 px-4 rounded shadow-sm text-sm border border-slate-300 flex-1 text-center transition-colors">
+                            📎 {attachmentName || "Upload UI Mockup"}
+                            <input type="file" accept="image/png, image/jpeg" className="hidden" onChange={handleFileUpload} />
+                        </label>
+                        {attachment && (
+                            <button onClick={() => { setAttachment(null); setAttachmentName(null); }} className="text-red-500 hover:text-red-700 px-2" title="Remove attachment">
+                                ✖
+                            </button>
+                        )}
+                    </div>
+                </div>
+
+                <button
                                     onClick={() => handleUatDecision(false)}
                                     className="flex-1 bg-rose-600 hover:bg-rose-700 text-white font-black py-4 px-6 rounded shadow-lg text-lg transition-colors border border-rose-500 -skew-x-12"
                                 >
                                     <div className="skew-x-12">❌ Reject (Send Feedback)</div>
                                 </button>
-                                <button
+                                <div>
+                    <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">UI Mockup (PNG/JPG)</label>
+                    <div className="flex items-center gap-2">
+                        <label className="cursor-pointer bg-slate-200 hover:bg-slate-300 text-slate-700 font-bold py-2 px-4 rounded shadow-sm text-sm border border-slate-300 flex-1 text-center transition-colors">
+                            📎 {attachmentName || "Upload UI Mockup"}
+                            <input type="file" accept="image/png, image/jpeg" className="hidden" onChange={handleFileUpload} />
+                        </label>
+                        {attachment && (
+                            <button onClick={() => { setAttachment(null); setAttachmentName(null); }} className="text-red-500 hover:text-red-700 px-2" title="Remove attachment">
+                                ✖
+                            </button>
+                        )}
+                    </div>
+                </div>
+
+                <button
                                     onClick={() => handleUatDecision(true)}
                                     className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white font-black py-4 px-6 rounded shadow-lg text-lg transition-colors border border-emerald-500 -skew-x-12"
                                 >
@@ -346,7 +424,22 @@ export default function Cockpit() {
                             🎯 Codebase RAG Active
                         </span>}
                     </h2>
-                    <button
+                    <div>
+                    <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">UI Mockup (PNG/JPG)</label>
+                    <div className="flex items-center gap-2">
+                        <label className="cursor-pointer bg-slate-200 hover:bg-slate-300 text-slate-700 font-bold py-2 px-4 rounded shadow-sm text-sm border border-slate-300 flex-1 text-center transition-colors">
+                            📎 {attachmentName || "Upload UI Mockup"}
+                            <input type="file" accept="image/png, image/jpeg" className="hidden" onChange={handleFileUpload} />
+                        </label>
+                        {attachment && (
+                            <button onClick={() => { setAttachment(null); setAttachmentName(null); }} className="text-red-500 hover:text-red-700 px-2" title="Remove attachment">
+                                ✖
+                            </button>
+                        )}
+                    </div>
+                </div>
+
+                <button
                         onClick={handleTriggerReview}
                         disabled={!activeBranch || isReviewing}
                         className="bg-purple-600 hover:bg-purple-700 disabled:bg-purple-300 text-white font-bold py-1.5 px-3 rounded shadow transition-all flex items-center justify-center gap-2 text-sm"
@@ -406,7 +499,22 @@ export default function Cockpit() {
                  </div>
 
                  <div className="mt-auto">
-                    <button
+                    <div>
+                    <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">UI Mockup (PNG/JPG)</label>
+                    <div className="flex items-center gap-2">
+                        <label className="cursor-pointer bg-slate-200 hover:bg-slate-300 text-slate-700 font-bold py-2 px-4 rounded shadow-sm text-sm border border-slate-300 flex-1 text-center transition-colors">
+                            📎 {attachmentName || "Upload UI Mockup"}
+                            <input type="file" accept="image/png, image/jpeg" className="hidden" onChange={handleFileUpload} />
+                        </label>
+                        {attachment && (
+                            <button onClick={() => { setAttachment(null); setAttachmentName(null); }} className="text-red-500 hover:text-red-700 px-2" title="Remove attachment">
+                                ✖
+                            </button>
+                        )}
+                    </div>
+                </div>
+
+                <button
                         onClick={handleForceMerge}
                         disabled={!activeBranch || isMerging}
                         className="w-full bg-rose-600 hover:bg-rose-700 disabled:bg-rose-300 text-white font-bold py-3 rounded shadow transition-all flex items-center justify-center gap-2"
@@ -415,6 +523,97 @@ export default function Cockpit() {
                         Force Merge & Reset
                     </button>
                  </div>
+
+            </div>
+
+            {/* Bottom: Client Portal Kanban Storefront */}
+            <div className="h-[40vh] min-h-[300px] border-t-4 border-slate-300 bg-slate-200 p-6 shadow-inner flex flex-col z-20 relative">
+                <h2 className="text-xl font-black text-slate-800 uppercase mb-4 tracking-widest flex items-center gap-3">
+                    <span className="bg-blue-600 text-white p-1.5 rounded shadow-sm"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><line x1="9" y1="3" x2="9" y2="21"></line><line x1="15" y1="3" x2="15" y2="21"></line></svg></span>
+                    Client Portal - Kanban Storefront
+                </h2>
+
+                <div className="flex-1 flex gap-6 overflow-x-auto overflow-y-hidden snap-x pb-4 custom-scrollbar">
+                    {["pending", "running", "completed", "failed"].map(status => (
+                        <div key={status} className="flex-1 min-w-[300px] max-w-[400px] bg-slate-100/90 backdrop-blur rounded-xl p-4 flex flex-col snap-start border border-slate-300 shadow-md h-[100%] [clip-path:polygon(15px_0,100%_0,100%_calc(100%-15px),calc(100%-15px)_100%,0_100%,0_15px)]">
+                            <h4 className="text-sm font-bold text-slate-700 uppercase mb-3 pb-2 border-b border-slate-300 tracking-wider flex items-center justify-between">
+                                {status}
+                                <span className="bg-slate-300 text-slate-700 px-2 py-0.5 rounded-full text-xs shadow-sm font-black">
+                                    {queue.filter((t: any) => t.status === status).length}
+                                </span>
+                            </h4>
+                            <div className="flex-1 overflow-y-auto space-y-3 pr-2 custom-scrollbar pb-2">
+                                {queue.filter((t: any) => t.status === status).length === 0 ? (
+                                    <div className="text-xs text-slate-400 italic text-center mt-8 font-mono">Empty Column</div>
+                                ) : (
+                                    queue.filter((t: any) => t.status === status).map((task: any) => (
+                                        <div key={task.id} className={`p-4 rounded border-2 shadow-sm text-xs relative group transition-all hover:shadow-lg hover:-translate-y-1 ${task.status === 'running' ? 'border-blue-400 bg-blue-50/80' : task.status === 'completed' ? 'border-emerald-400 bg-emerald-50/80' : task.status === 'failed' ? 'border-rose-400 bg-rose-50/80' : 'border-slate-300 bg-white/80'}`}>
+                                            <div className="flex justify-between items-start mb-3">
+                                                <span className="font-mono font-black text-slate-700 truncate mr-2 text-sm bg-slate-200/50 px-1 rounded shadow-sm" title={task.id}>#{task.id.split('-')[0]}</span>
+                                                {task.agent_state && (
+                                                    <span className={`px-2 py-1 rounded text-[10px] uppercase font-black tracking-widest shadow-sm whitespace-nowrap ${task.status === 'running' ? 'bg-blue-600 text-white animate-pulse' : 'bg-slate-200 text-slate-600'}`} title={task.agent_state}>
+                                                        {task.agent_state.replace('_', ' ')}
+                                                    </span>
+                                                )}
+                                            </div>
+                                            <div className="text-slate-700 line-clamp-3 mb-3 font-medium text-sm border-l-2 border-slate-300 pl-2" title={task.prompt}>{task.prompt}</div>
+
+                                            {task.status === 'completed' && task.tokensBurned && (
+                                                <div className="mt-2 pt-3 border-t-2 border-emerald-200 border-dashed flex justify-between items-center">
+                                                    <span className="text-sm text-emerald-800 font-black font-mono bg-emerald-100 px-2 py-1 rounded shadow-inner flex items-center gap-1">Cost: ${(task.tokensBurned / 1000000 * 1.25).toFixed(4)}</span>
+                                                    <div>
+                    <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">UI Mockup (PNG/JPG)</label>
+                    <div className="flex items-center gap-2">
+                        <label className="cursor-pointer bg-slate-200 hover:bg-slate-300 text-slate-700 font-bold py-2 px-4 rounded shadow-sm text-sm border border-slate-300 flex-1 text-center transition-colors">
+                            📎 {attachmentName || "Upload UI Mockup"}
+                            <input type="file" accept="image/png, image/jpeg" className="hidden" onChange={handleFileUpload} />
+                        </label>
+                        {attachment && (
+                            <button onClick={() => { setAttachment(null); setAttachmentName(null); }} className="text-red-500 hover:text-red-700 px-2" title="Remove attachment">
+                                ✖
+                            </button>
+                        )}
+                    </div>
+                </div>
+
+                <button className="text-[10px] bg-emerald-600 hover:bg-emerald-500 text-white px-3 py-1.5 shadow-md font-black uppercase -skew-x-12 transition-transform hover:scale-105 border border-emerald-400">
+                                                        <div className="skew-x-12 flex items-center gap-1">🧾 Invoice</div>
+                                                    </button>
+                                                </div>
+                                            )}
+                                            {task.status === 'running' && task.agent_state && (
+                                                <div className="mt-2 pt-3 border-t-2 border-blue-200 border-dashed">
+                                                    <div className="w-full bg-blue-200 rounded-full h-2 mb-2 shadow-inner overflow-hidden border border-blue-300 relative">
+                                                        <div className="bg-blue-500 h-full rounded-full animate-pulse absolute left-0" style={{ width: '60%' }}></div>
+                                                    </div>
+                                                    <div className="text-[10px] text-blue-800 font-black uppercase tracking-widest text-center">{task.agent_state.replace('_', ' ')} In Progress...</div>
+                                                </div>
+                                            )}
+                                        </div>
+                                    ))
+                                )}
+                            </div>
+                        </div>
+                    ))}
+                </div>
+                <style>{`
+                .custom-scrollbar::-webkit-scrollbar {
+                  width: 6px;
+                  height: 6px;
+                }
+                .custom-scrollbar::-webkit-scrollbar-track {
+                  background: transparent;
+                }
+                .custom-scrollbar::-webkit-scrollbar-thumb {
+                  background-color: rgba(148, 163, 184, 0.5);
+                  border-radius: 10px;
+                }
+                @keyframes progress {
+                  0% { width: 0%; opacity: 0.8; }
+                  50% { width: 100%; opacity: 1; }
+                  100% { width: 0%; opacity: 0.8; }
+                }
+                `}</style>
             </div>
         </div>
     );
