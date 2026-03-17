@@ -23,27 +23,24 @@ class PMAgent:
 
         content_payload = [full_prompt]
         if attachments:
-            import base64
             for att in attachments:
-                if att.startswith("data:image"):
-                    # Extract the base64 part
-                    base64_data = att.split(",")[1]
-                    mime_type = att.split(";")[0].split(":")[1]
-                    image_bytes = base64.b64decode(base64_data)
-                    content_payload.append({
-                        "mime_type": mime_type,
-                        "data": image_bytes
-                    })
-                else:
-                    # Try raw base64 decode
+                if att.startswith("/uploads/"):
+                    # It's a local file path url
+                    file_path = os.path.join(os.getcwd(), "public", att.lstrip("/"))
                     try:
-                        image_bytes = base64.b64decode(att)
+                        with open(file_path, "rb") as f:
+                            image_bytes = f.read()
+
+                        mime_type = "image/png"
+                        if att.lower().endswith(".jpg") or att.lower().endswith(".jpeg"):
+                            mime_type = "image/jpeg"
+
                         content_payload.append({
-                            "mime_type": "image/png", # Default guess
+                            "mime_type": mime_type,
                             "data": image_bytes
                         })
                     except Exception as e:
-                        pass # Ignore invalid base64 string
+                        print(f"Failed to read image file {file_path}: {e}")
 
         response = self.model.generate_content(content_payload)
 

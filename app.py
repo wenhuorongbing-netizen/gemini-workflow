@@ -19,6 +19,13 @@ import glob
 
 # --- PHASE 1: PROGRAMMATIC OS-LEVEL PURGE ---
 def enforce_repository_hygiene():
+    # The Zombie Browser Hunter (Phase 3)
+    try:
+        os.system("pkill -f chrome || true")
+        os.system("pkill -f chromium || true")
+    except Exception as e:
+        pass
+
     cleanup_patterns = ['patch_*.py', '.jules/bolt.md', 'watch_test_folder', '*.png']
     for pattern in cleanup_patterns:
         for filepath in glob.glob(pattern):
@@ -722,7 +729,9 @@ async def run_devhouse_autopilot(task_id, initial_prompt, attachments, target_re
 
     # Extract Repo info
     repo_name = target_repo.split('/')[-1].replace('.git', '')
-    workspace_dir = f"/tmp/devhouse_workspaces/{task_id}_{repo_name}"
+    import uuid
+    run_id = str(uuid.uuid4())
+    workspace_dir = f"/tmp/devhouse_workspaces/{run_id}/"
 
     try:
         await devhouse_queue.put({"type": "info", "message": f"[PM] Analyzing requirements for Auto-Dev loop..."})

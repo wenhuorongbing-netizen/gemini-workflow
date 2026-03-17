@@ -114,16 +114,28 @@ export default function Cockpit() {
         setLogs(prev => [...prev, { message: msg, type }]);
     };
 
-    const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
         if (file) {
             setAttachmentName(file.name);
-            const reader = new FileReader();
-            reader.onloadend = () => {
-                const base64String = reader.result as string;
-                setAttachment(base64String);
-            };
-            reader.readAsDataURL(file);
+            const formData = new FormData();
+            formData.append("file", file);
+
+            try {
+                const res = await fetch("/api/upload", {
+                    method: "POST",
+                    body: formData,
+                });
+                const data = await res.json();
+                if (data.success && data.url) {
+                    setAttachment(data.url);
+                } else {
+                    addLog("Upload failed", "error");
+                }
+            } catch (err) {
+                console.error("File upload error", err);
+                addLog("Upload error", "error");
+            }
         }
     };
 
@@ -150,8 +162,6 @@ export default function Cockpit() {
                 setPrompt("");
                 setTargetRepo("");
                 setKbLinks("");
-                setAttachment(null);
-                setAttachmentName(null);
                 setAttachment(null);
                 setAttachmentName(null);
                 fetchQueue();
