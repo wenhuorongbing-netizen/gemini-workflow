@@ -32,7 +32,7 @@ export default function ClientPortal() {
         return () => clearInterval(interval);
     }, []);
 
-    // Phase 3: Real-Time SSE Synchronization
+    // Phase 1: Real-Time SSE Synchronization for Kanban Board
     useEffect(() => {
         const eventSource = new EventSource('/api/devhouse/logs');
         eventSource.onmessage = (e) => {

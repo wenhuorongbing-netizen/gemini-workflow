@@ -138,7 +138,7 @@ export default function Cockpit() {
         }
         setIsStarting(true);
         try {
-            const res = await fetch("/api/devhouse/queue", {
+            const res = await fetch("/api/devhouse/start", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ prompt, target_repo: targetRepo.trim(), kbLinks, model, webhookUrl, attachments: attachment ? [attachment] : [] })
@@ -318,21 +318,6 @@ export default function Cockpit() {
                     </div>
                 </div>
 
-                <div>
-                    <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">UI Mockup (PNG/JPG)</label>
-                    <div className="flex items-center gap-2">
-                        <label className="cursor-pointer bg-slate-200 hover:bg-slate-300 text-slate-700 font-bold py-2 px-4 rounded shadow-sm text-sm border border-slate-300 flex-1 text-center transition-colors">
-                            📎 {attachmentName || "Upload UI Mockup"}
-                            <input type="file" accept="image/png, image/jpeg" className="hidden" onChange={handleFileUpload} />
-                        </label>
-                        {attachment && (
-                            <button onClick={() => { setAttachment(null); setAttachmentName(null); }} className="text-red-500 hover:text-red-700 px-2" title="Remove attachment">
-                                ✖
-                            </button>
-                        )}
-                    </div>
-                </div>
-
                 <button
                     onClick={handleAddToQueue}
                     disabled={isStarting}
@@ -370,43 +355,14 @@ export default function Cockpit() {
                                 className="w-full p-3 bg-slate-900 border border-slate-600 text-white rounded focus:ring-2 focus:ring-blue-500 focus:outline-none resize-none h-20 text-sm"
                             />
                             <div className="flex gap-4 mt-2">
-                                <div>
-                    <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">UI Mockup (PNG/JPG)</label>
-                    <div className="flex items-center gap-2">
-                        <label className="cursor-pointer bg-slate-200 hover:bg-slate-300 text-slate-700 font-bold py-2 px-4 rounded shadow-sm text-sm border border-slate-300 flex-1 text-center transition-colors">
-                            📎 {attachmentName || "Upload UI Mockup"}
-                            <input type="file" accept="image/png, image/jpeg" className="hidden" onChange={handleFileUpload} />
-                        </label>
-                        {attachment && (
-                            <button onClick={() => { setAttachment(null); setAttachmentName(null); }} className="text-red-500 hover:text-red-700 px-2" title="Remove attachment">
-                                ✖
-                            </button>
-                        )}
-                    </div>
-                </div>
-
-                <button
+                                <button
                                     onClick={() => handleUatDecision(false)}
                                     className="flex-1 bg-rose-600 hover:bg-rose-700 text-white font-black py-4 px-6 rounded shadow-lg text-lg transition-colors border border-rose-500 -skew-x-12"
                                 >
                                     <div className="skew-x-12">❌ Reject (Send Feedback)</div>
                                 </button>
-                                <div>
-                    <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">UI Mockup (PNG/JPG)</label>
-                    <div className="flex items-center gap-2">
-                        <label className="cursor-pointer bg-slate-200 hover:bg-slate-300 text-slate-700 font-bold py-2 px-4 rounded shadow-sm text-sm border border-slate-300 flex-1 text-center transition-colors">
-                            📎 {attachmentName || "Upload UI Mockup"}
-                            <input type="file" accept="image/png, image/jpeg" className="hidden" onChange={handleFileUpload} />
-                        </label>
-                        {attachment && (
-                            <button onClick={() => { setAttachment(null); setAttachmentName(null); }} className="text-red-500 hover:text-red-700 px-2" title="Remove attachment">
-                                ✖
-                            </button>
-                        )}
-                    </div>
-                </div>
 
-                <button
+                                <button
                                     onClick={() => handleUatDecision(true)}
                                     className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white font-black py-4 px-6 rounded shadow-lg text-lg transition-colors border border-emerald-500 -skew-x-12"
                                 >
@@ -424,22 +380,8 @@ export default function Cockpit() {
                             🎯 Codebase RAG Active
                         </span>}
                     </h2>
-                    <div>
-                    <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">UI Mockup (PNG/JPG)</label>
-                    <div className="flex items-center gap-2">
-                        <label className="cursor-pointer bg-slate-200 hover:bg-slate-300 text-slate-700 font-bold py-2 px-4 rounded shadow-sm text-sm border border-slate-300 flex-1 text-center transition-colors">
-                            📎 {attachmentName || "Upload UI Mockup"}
-                            <input type="file" accept="image/png, image/jpeg" className="hidden" onChange={handleFileUpload} />
-                        </label>
-                        {attachment && (
-                            <button onClick={() => { setAttachment(null); setAttachmentName(null); }} className="text-red-500 hover:text-red-700 px-2" title="Remove attachment">
-                                ✖
-                            </button>
-                        )}
-                    </div>
-                </div>
 
-                <button
+                    <button
                         onClick={handleTriggerReview}
                         disabled={!activeBranch || isReviewing}
                         className="bg-purple-600 hover:bg-purple-700 disabled:bg-purple-300 text-white font-bold py-1.5 px-3 rounded shadow transition-all flex items-center justify-center gap-2 text-sm"
@@ -499,22 +441,7 @@ export default function Cockpit() {
                  </div>
 
                  <div className="mt-auto">
-                    <div>
-                    <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">UI Mockup (PNG/JPG)</label>
-                    <div className="flex items-center gap-2">
-                        <label className="cursor-pointer bg-slate-200 hover:bg-slate-300 text-slate-700 font-bold py-2 px-4 rounded shadow-sm text-sm border border-slate-300 flex-1 text-center transition-colors">
-                            📎 {attachmentName || "Upload UI Mockup"}
-                            <input type="file" accept="image/png, image/jpeg" className="hidden" onChange={handleFileUpload} />
-                        </label>
-                        {attachment && (
-                            <button onClick={() => { setAttachment(null); setAttachmentName(null); }} className="text-red-500 hover:text-red-700 px-2" title="Remove attachment">
-                                ✖
-                            </button>
-                        )}
-                    </div>
-                </div>
-
-                <button
+                    <button
                         onClick={handleForceMerge}
                         disabled={!activeBranch || isMerging}
                         className="w-full bg-rose-600 hover:bg-rose-700 disabled:bg-rose-300 text-white font-bold py-3 rounded shadow transition-all flex items-center justify-center gap-2"
@@ -561,22 +488,7 @@ export default function Cockpit() {
                                             {task.status === 'completed' && task.tokensBurned && (
                                                 <div className="mt-2 pt-3 border-t-2 border-emerald-200 border-dashed flex justify-between items-center">
                                                     <span className="text-sm text-emerald-800 font-black font-mono bg-emerald-100 px-2 py-1 rounded shadow-inner flex items-center gap-1">Cost: ${(task.tokensBurned / 1000000 * 1.25).toFixed(4)}</span>
-                                                    <div>
-                    <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">UI Mockup (PNG/JPG)</label>
-                    <div className="flex items-center gap-2">
-                        <label className="cursor-pointer bg-slate-200 hover:bg-slate-300 text-slate-700 font-bold py-2 px-4 rounded shadow-sm text-sm border border-slate-300 flex-1 text-center transition-colors">
-                            📎 {attachmentName || "Upload UI Mockup"}
-                            <input type="file" accept="image/png, image/jpeg" className="hidden" onChange={handleFileUpload} />
-                        </label>
-                        {attachment && (
-                            <button onClick={() => { setAttachment(null); setAttachmentName(null); }} className="text-red-500 hover:text-red-700 px-2" title="Remove attachment">
-                                ✖
-                            </button>
-                        )}
-                    </div>
-                </div>
-
-                <button className="text-[10px] bg-emerald-600 hover:bg-emerald-500 text-white px-3 py-1.5 shadow-md font-black uppercase -skew-x-12 transition-transform hover:scale-105 border border-emerald-400">
+                                                    <button className="text-[10px] bg-emerald-600 hover:bg-emerald-500 text-white px-3 py-1.5 shadow-md font-black uppercase -skew-x-12 transition-transform hover:scale-105 border border-emerald-400">
                                                         <div className="skew-x-12 flex items-center gap-1">🧾 Invoice</div>
                                                     </button>
                                                 </div>

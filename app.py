@@ -1093,6 +1093,21 @@ async def run_devhouse_autopilot(task_id, initial_prompt, attachments, target_re
                 # Give the dev server a few seconds to bind
                 await asyncio.sleep(5)
 
+                # Automated UAT Visual Diff Thumbnail capture
+                try:
+                    from playwright.async_api import async_playwright
+                    await devhouse_queue.put({"type": "info", "message": "[SYSTEM] Capturing automated UAT visual diff thumbnail..."})
+                    async with async_playwright() as p:
+                        browser = await p.chromium.launch(headless=True)
+                        page = await browser.new_page()
+                        await page.goto("http://localhost:3005", wait_until="networkidle", timeout=15000)
+                        # Ensure public dir exists
+                        os.makedirs("public", exist_ok=True)
+                        await page.screenshot(path="public/uat_preview.png")
+                        await browser.close()
+                except Exception as e:
+                    logging.warning(f"Failed to capture UAT thumbnail: {e}")
+
                 # Set State to AWAITING_UAT
                 save_state(iteration, accumulated_context, 'AWAITING_UAT')
                 conn = sqlite3.connect(db_path)
@@ -1328,7 +1343,7 @@ async def api_devhouse_sentry(request: Request, background_tasks: BackgroundTask
     except Exception as e:
         return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
 
-@app.post("/api/devhouse/queue")
+@app.post("/api/devhouse/start")
 async def api_devhouse_queue(request: Request, background_tasks: BackgroundTasks):
     data = await request.json()
     prompt = data.get("prompt")
