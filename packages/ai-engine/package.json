@@ -1,0 +1,16 @@
+{
+  "name": "@codex/ai-engine",
+  "version": "1.0.0",
+  "description": "AI Engine for DOM Analysis",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc"
+  },
+  "dependencies": {
+    "openai": "^4.20.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0"
+  }
+}
