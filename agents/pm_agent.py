@@ -13,46 +13,57 @@ class PMAgent:
         genai.configure(api_key=gemini_api_key)
         self.model = genai.GenerativeModel('gemini-1.5-pro') if model_type == "Pro" else genai.GenerativeModel('gemini-1.5-flash')
 
+    def generate_spec_from_image(self, image_path: str, user_prompt: str) -> str:
+        """
+        Reads the physical image bytes from the local disk, sends to Gemini 1.5 Pro,
+        and returns a step-by-step Technical Specification.
+        """
+        content_payload = []
+        system_prompt = (
+            "You are an Expert UI/UX Product Manager. The user has provided a screenshot "
+            "of a requested UI. Analyze the image and generate a flawless, component-by-step "
+            "Technical Specification for our developer to build this in Next.js and Tailwind CSS. "
+            "Detail the colors, layout constraints, and interactions."
+        )
+
+        try:
+            with open(image_path, "rb") as f:
+                image_bytes = f.read()
+
+            mime_type = "image/png"
+            if image_path.lower().endswith(".jpg") or image_path.lower().endswith(".jpeg"):
+                mime_type = "image/jpeg"
+            elif image_path.lower().endswith(".webp"):
+                mime_type = "image/webp"
+
+            content_payload.append({
+                "mime_type": mime_type,
+                "data": image_bytes
+            })
+        except Exception as e:
+            print(f"[PMAgent] Failed to read image file at {image_path}: {e}")
+
+        full_prompt = f"{system_prompt}\n\nUser Request: {user_prompt}"
+        content_payload.append(full_prompt)
+
+        response = self.model.generate_content(content_payload)
+        return response.text
+
     def generate_tech_spec(self, prompt: str, image_url: str = None) -> str:
         """
         Generates a highly detailed Technical Specification string.
         Uses Multi-Modal vision capabilities if an image_url is provided.
         """
-        content_payload = []
-
         if image_url and image_url.startswith("/uploads/"):
-            system_prompt = (
-                "You are an Expert UI/UX Product Manager. The user has provided a screenshot "
-                "of a requested UI. Analyze the image and generate a flawless, component-by-step "
-                "Technical Specification for our developer to build this in Next.js and Tailwind CSS. "
-                "Detail the colors, layout constraints, and interactions."
-            )
-
-            # Map the web URL to the physical local path in Next.js public directory
             physical_path = os.path.join(os.getcwd(), "public", image_url.lstrip("/"))
+            return self.generate_spec_from_image(physical_path, prompt)
 
-            try:
-                with open(physical_path, "rb") as f:
-                    image_bytes = f.read()
-
-                mime_type = "image/png"
-                if image_url.lower().endswith(".jpg") or image_url.lower().endswith(".jpeg"):
-                    mime_type = "image/jpeg"
-                elif image_url.lower().endswith(".webp"):
-                    mime_type = "image/webp"
-
-                content_payload.append({
-                    "mime_type": mime_type,
-                    "data": image_bytes
-                })
-            except Exception as e:
-                print(f"[PMAgent] Failed to read image file at {physical_path}: {e}")
-        else:
-            system_prompt = (
-                "You are the Lead Architect for the Auto-DevHouse. Analyze the user request "
-                "and produce a highly structured Technical Specification and Step-by-Step Implementation "
-                "Plan for the Developer agent. DO NOT WRITE CODE. Outline exactly what files to edit and how."
-            )
+        content_payload = []
+        system_prompt = (
+            "You are the Lead Architect for the Auto-DevHouse. Analyze the user request "
+            "and produce a highly structured Technical Specification and Step-by-Step Implementation "
+            "Plan for the Developer agent. DO NOT WRITE CODE. Outline exactly what files to edit and how."
+        )
 
         # Append the text prompt
         full_prompt = f"{system_prompt}\n\nUser Request: {prompt}"
