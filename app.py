@@ -803,7 +803,7 @@ async def run_devhouse_autopilot(task_id, initial_prompt, attachments, target_re
         await devhouse_queue.put({"type": "radar", "message": f"Radar mapped {workspace_dir}"})
 
         await devhouse_queue.put({"type": "action", "message": f"[PM] Generating initial technical spec..."})
-        pm_agent = PMAgent(model_type)
+        pm_agent = PMAgent(workspace_dir, run_id, model_type)
         qa_agent = QAAgent(pm_agent.get_model())
         secops_agent = SecOpsAgent(pm_agent.get_model())
 
