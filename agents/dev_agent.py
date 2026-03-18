@@ -1,4 +1,5 @@
 import asyncio
+import os
 import logging
 from typing import Optional, Any
 from bot import GeminiBot, JulesBot
@@ -6,15 +7,79 @@ from playwright.async_api import Page, async_playwright
 
 class DevAgent:
     """
-    Micro-Sprint C: Sandboxed Dev Agent
-    Strictly isolated and confined to the absolute UUID workspace directory.
-    Guarantees no Zombie Chromium instances via the try...finally hunter loop.
+    Route B: Native File-Editing Dev Agent
+    Interacts directly with the file system within an isolated UUID sandbox.
     """
-    def __init__(self, sandbox_cwd: str = None, bot: Optional[GeminiBot] = None, page: Optional[Page] = None):
-        self.sandbox_cwd = sandbox_cwd
-        # Backwards compatibility for existing orchestration
-        self.bot = bot
-        self.page = page
+    def __init__(self, sandbox_path: str = None, sandbox_cwd: str = None, bot: Optional[GeminiBot] = None, page: Optional[Page] = None, *args, **kwargs):
+        # Support both sandbox_path and sandbox_cwd naming for backwards compatibility
+        self.sandbox_path = sandbox_path or sandbox_cwd or (args[0] if len(args) > 0 and isinstance(args[0], str) else None)
+
+        # Legacy compatibility for app.py passing bot and page as positional arguments
+        if not self.sandbox_path and len(args) >= 2:
+             self.bot = args[0]
+             self.page = args[1]
+        else:
+             self.bot = bot
+             self.page = page
+
+        # Fallback to bot and page if passed directly
+        if not self.bot and bot:
+             self.bot = bot
+        if not self.page and page:
+             self.page = page
+
+        # For test_e2e_engine backwards compat where bot/page might be passed as kwargs or positional args 1 & 2
+        if bot and not self.bot:
+             self.bot = bot
+        if page and not self.page:
+             self.page = page
+
+    def apply_code_changes(self, file_path: str, code_content: str) -> bool:
+        """
+        Uses standard Python file operations to overwrite/create the file securely within the sandbox.
+        """
+        if not self.sandbox_path:
+            raise Exception("Cannot apply code changes: sandbox_path is not set.")
+
+        # Resolve path safely inside the sandbox
+        safe_path = os.path.abspath(os.path.join(self.sandbox_path, file_path.lstrip("/")))
+        if not safe_path.startswith(os.path.abspath(self.sandbox_path)):
+            raise Exception(f"Security Violation: Attempted to write outside sandbox ({safe_path})")
+
+        # Ensure directory exists
+        os.makedirs(os.path.dirname(safe_path), exist_ok=True)
+
+        with open(safe_path, "w") as f:
+            f.write(code_content)
+
+        logging.info(f"[DEV AGENT] Successfully wrote file: {safe_path}")
+        return True
+
+    async def run_compilation(self) -> dict:
+        """
+        Runs `npm run build` within the sandbox_path to verify compilation.
+        Returns the result as {"success": bool, "error_log": str}
+        """
+        if not self.sandbox_path:
+            return {"success": False, "error_log": "Sandbox path not set."}
+
+        logging.info(f"[DEV AGENT] Running compilation in {self.sandbox_path}")
+        try:
+            process = await asyncio.create_subprocess_exec(
+                "npm", "run", "build",
+                cwd=self.sandbox_path,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await process.communicate()
+
+            if process.returncode == 0:
+                return {"success": True, "error_log": ""}
+            else:
+                error_log = stderr.decode('utf-8') or stdout.decode('utf-8')
+                return {"success": False, "error_log": error_log}
+        except Exception as e:
+            return {"success": False, "error_log": str(e)}
 
     async def execute_coding_task(self, tech_spec: str) -> Any:
         """
@@ -100,3 +165,31 @@ class DevAgent:
                         pass
         else:
             return await self.execute_coding_task(instruction)
+
+if __name__ == "__main__":
+    # Test block for Micro-Sprint verification
+    import tempfile
+    import os
+
+    # Create a temporary sandbox directory
+    with tempfile.TemporaryDirectory() as temp_dir:
+        print(f"Testing DevAgent in sandbox: {temp_dir}")
+        agent = DevAgent(sandbox_path=temp_dir)
+
+        # Test file creation
+        test_file = "src/index.ts"
+        test_code = "console.log('Hello, Native Dev Agent!');"
+
+        agent.apply_code_changes(test_file, test_code)
+
+        # Verify physical existence
+        expected_path = os.path.join(temp_dir, "src/index.ts")
+        if os.path.exists(expected_path):
+            with open(expected_path, "r") as f:
+                content = f.read()
+                if content == test_code:
+                    print("SUCCESS: File created and verified successfully.")
+                else:
+                    print(f"ERROR: File content mismatch. Expected {test_code}, got {content}")
+        else:
+            print(f"ERROR: File was not created at {expected_path}")
