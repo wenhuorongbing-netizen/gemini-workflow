@@ -11,8 +11,13 @@ class QAAgent:
         response = self.model.generate_content(qa_prompt)
 
         tokens_burned = 0
+        usage = {}
         if hasattr(response, 'usage_metadata'):
             tokens_burned = response.usage_metadata.total_token_count
+            usage = {
+                'prompt_token_count': response.usage_metadata.prompt_token_count,
+                'candidates_token_count': response.usage_metadata.candidates_token_count
+            }
 
         qa_text = response.text
         code_blocks = re.findall(r'```(?:python|javascript|js|typescript|ts)?\n(.*?)\n```', qa_text, re.DOTALL)
@@ -21,4 +26,4 @@ class QAAgent:
         if code_blocks:
             test_script_content = code_blocks[0]
 
-        return test_script_content, tokens_burned
+        return test_script_content, tokens_burned, usage

@@ -22,7 +22,16 @@ class DevAgent:
             # is handled by the orchestrator in app.py. But we need to wait for Jules.
             jules_response = await self.bot.poll_for_completion(self.page)
 
-            return jules_response
+            # Dev Agent uses Playwright/Puppeteer heuristic, so we estimate token usage based on instruction length
+            dev_prompt_tokens = len(instruction) // 4
+            dev_completion_tokens = len(jules_response) // 4
+
+            usage = {
+                'prompt_token_count': dev_prompt_tokens,
+                'candidates_token_count': dev_completion_tokens
+            }
+
+            return jules_response, dev_prompt_tokens + dev_completion_tokens, usage
         finally:
             # Zombie Browser Hunter: Ensure browser closes properly.
             # In DevAgent, we call bot.quit() to guarantee no orphaned Chromium instances.

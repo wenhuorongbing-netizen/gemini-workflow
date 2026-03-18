@@ -65,3 +65,13 @@ model CorporateMemory {
   solution      String
   createdAt     DateTime @default(now())
 }
+
+model TelemetryLog {
+  id               String   @id @default(uuid())
+  runId            String
+  agentRole        String   // PM, DEV, QA, SECOPS
+  tokensPrompt     Int
+  tokensCompletion Int
+  costEstimated    Float
+  createdAt        DateTime @default(now())
+}

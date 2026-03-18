@@ -10,7 +10,12 @@ class SecOpsAgent:
         response = self.model.generate_content(secops_prompt)
 
         tokens_burned = 0
+        usage = {}
         if hasattr(response, 'usage_metadata'):
             tokens_burned = response.usage_metadata.total_token_count
+            usage = {
+                'prompt_token_count': response.usage_metadata.prompt_token_count,
+                'candidates_token_count': response.usage_metadata.candidates_token_count
+            }
 
-        return response.text.strip(), tokens_burned
+        return response.text.strip(), tokens_burned, usage

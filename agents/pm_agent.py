@@ -45,10 +45,15 @@ class PMAgent:
         response = self.model.generate_content(content_payload)
 
         tokens_burned = 0
+        usage = {}
         if hasattr(response, 'usage_metadata'):
             tokens_burned = response.usage_metadata.total_token_count
+            usage = {
+                'prompt_token_count': response.usage_metadata.prompt_token_count,
+                'candidates_token_count': response.usage_metadata.candidates_token_count
+            }
 
-        return response.text, tokens_burned
+        return response.text, tokens_burned, usage
 
     def review_diff(self, diff: str, accumulated_context: str):
         """Reviews the generated code diff for correctness and regressions."""
@@ -56,10 +61,15 @@ class PMAgent:
         response = self.model.generate_content(review_prompt)
 
         tokens_burned = 0
+        usage = {}
         if hasattr(response, 'usage_metadata'):
             tokens_burned = response.usage_metadata.total_token_count
+            usage = {
+                'prompt_token_count': response.usage_metadata.prompt_token_count,
+                'candidates_token_count': response.usage_metadata.candidates_token_count
+            }
 
-        return response.text, tokens_burned
+        return response.text, tokens_burned, usage
 
     def get_model(self):
         """Returns the configured model instance for other agents to share."""

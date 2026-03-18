@@ -4,6 +4,46 @@ from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import os
 import asyncio
+import httpx
+
+def log_telemetry(run_id: str, agent_role: str, usage: dict):
+    """
+    V46 Telemetry Pumping
+    usage dict should contain 'prompt_token_count' and 'candidates_token_count'
+    """
+    try:
+        tokens_prompt = usage.get('prompt_token_count', 0)
+        tokens_completion = usage.get('candidates_token_count', 0)
+
+        # Estimate cost: $1.25 per 1M prompt tokens, $3.75 per 1M completion tokens for Pro
+        cost_prompt = (tokens_prompt / 1000000) * 1.25
+        cost_completion = (tokens_completion / 1000000) * 3.75
+        cost_estimated = cost_prompt + cost_completion
+
+        payload = {
+            "runId": run_id,
+            "agentRole": agent_role,
+            "tokensPrompt": tokens_prompt,
+            "tokensCompletion": tokens_completion,
+            "costEstimated": cost_estimated
+        }
+
+        # Make a fast background HTTP POST
+        import asyncio
+        async def _send():
+            try:
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    await client.post("http://localhost:3000/api/telemetry", json=payload)
+            except Exception as ex:
+                pass
+
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(_send())
+        except RuntimeError:
+            asyncio.run(_send())
+    except Exception as e:
+        pass
 import logging
 from bot import GeminiBot, JulesBot
 import json
@@ -788,8 +828,9 @@ async def run_devhouse_autopilot(task_id, initial_prompt, attachments, target_re
         except Exception as e:
             logging.warning(f"Failed to load corporate memory: {e}")
 
-        initial_spec, spec_tokens = pm_agent.generate_initial_spec(initial_prompt, radar_report, kb_links, corporate_memory=corporate_memory_context, attachments=attachments)
+        initial_spec, spec_tokens, spec_usage = pm_agent.generate_initial_spec(initial_prompt, radar_report, kb_links, corporate_memory=corporate_memory_context, attachments=attachments)
         pm_tokens_burned += spec_tokens
+        log_telemetry(task_id, "PM", spec_usage)
 
         await devhouse_queue.put({"type": "action", "message": f"[DEV] Spawning Jules..."})
 
@@ -894,7 +935,9 @@ async def run_devhouse_autopilot(task_id, initial_prompt, attachments, target_re
             try:
                 # Step A & B: Send task to Jules and wait
                 await devhouse_queue.put({"type": "info", "message": f"[DEV] Iteration {iteration}/{max_iterations}: Writing code... Waiting for 'Ready for Review'."})
-                jules_status = await asyncio.wait_for(dev_agent.execute_task(jules_instruction), timeout=900)
+                jules_status, dev_tokens, dev_usage = await asyncio.wait_for(dev_agent.execute_task(jules_instruction), timeout=900)
+                dev_tokens_burned += dev_tokens
+                log_telemetry(task_id, "DEV", dev_usage)
 
                 if not jules_status:
                     raise Exception("Timeout waiting for Jules to finish task.")
@@ -994,8 +1037,9 @@ async def run_devhouse_autopilot(task_id, initial_prompt, attachments, target_re
                 await update_agent_state("SECOPS_AUDIT")
                 await devhouse_queue.put({"type": "info", "message": f"[SECOPS] 🛡️ SecOps Agent analyzing diff for vulnerabilities..."})
 
-                secops_text, sec_tokens = secops_agent.analyze_diff(latest_diff)
+                secops_text, sec_tokens, sec_usage = secops_agent.analyze_diff(latest_diff)
                 pm_tokens_burned += sec_tokens
+                log_telemetry(task_id, "SECOPS", sec_usage)
 
                 if "APPROVED" not in secops_text.upper():
                     await devhouse_queue.put({"type": "error", "message": f"[SECOPS] 🛑 Security Violation Detected:\n{secops_text}"})
@@ -1021,8 +1065,9 @@ async def run_devhouse_autopilot(task_id, initial_prompt, attachments, target_re
                 await update_agent_state("QA_AUDIT")
                 await devhouse_queue.put({"type": "info", "message": f"[QA] 🧪 QA Agent generating TDD test cases..."})
 
-                test_script_content, qa_tokens = qa_agent.generate_tests(latest_diff)
+                test_script_content, qa_tokens, qa_usage = qa_agent.generate_tests(latest_diff)
                 pm_tokens_burned += qa_tokens
+                log_telemetry(task_id, "QA", qa_usage)
 
                 if test_script_content:
                     test_file_path = os.path.join(workspace_dir, "devhouse_swarm_test.spec.js") # For NPM run test compliance
@@ -1162,8 +1207,9 @@ async def run_devhouse_autopilot(task_id, initial_prompt, attachments, target_re
             await update_agent_state("PM_REVIEW")
             await devhouse_queue.put({"type": "action", "message": f"[PM] Reviewing Diff: Analyzing code changes..."})
 
-            review_text, review_tokens = pm_agent.review_diff(latest_diff, accumulated_context)
+            review_text, review_tokens, review_usage = pm_agent.review_diff(latest_diff, accumulated_context)
             pm_tokens_burned += review_tokens
+            log_telemetry(task_id, "PM", review_usage)
 
             accumulated_context += f"\n\nReview (Iter {iteration}):\n{review_text}"
 
