@@ -23,7 +23,7 @@ export async function POST(request: Request) {
     // Generate unique UUID filename
     const uniqueName = `${uuidv4()}${ext}`;
 
-    const uploadDir = join(process.cwd(), 'public', 'uploads');
+    const uploadDir = join(process.cwd(), 'public', 'uploads', 'mockups');
 
     try {
       // Attempt to create the directory if it doesn't exist
@@ -39,7 +39,7 @@ export async function POST(request: Request) {
     // Save physically to disk
     await writeFile(filePath, buffer);
 
-    const publicUrl = `/uploads/${uniqueName}`;
+    const publicUrl = `/uploads/mockups/${uniqueName}`;
 
     return NextResponse.json({ success: true, url: publicUrl });
   } catch (error: any) {
