@@ -14,6 +14,9 @@ class DevAgent:
         # Support both sandbox_path and sandbox_cwd naming for backwards compatibility
         self.sandbox_path = sandbox_path or sandbox_cwd or (args[0] if len(args) > 0 and isinstance(args[0], str) else None)
 
+        if self.sandbox_path:
+            os.makedirs(self.sandbox_path, exist_ok=True)
+
         # Legacy compatibility for app.py passing bot and page as positional arguments
         if not self.sandbox_path and len(args) >= 2:
              self.bot = args[0]
@@ -34,7 +37,7 @@ class DevAgent:
         if page and not self.page:
              self.page = page
 
-    def apply_code_changes(self, file_path: str, code_content: str) -> bool:
+    def apply_code_changes(self, relative_path: str, code_content: str) -> bool:
         """
         Uses standard Python file operations to overwrite/create the file securely within the sandbox.
         """
@@ -42,7 +45,7 @@ class DevAgent:
             raise Exception("Cannot apply code changes: sandbox_path is not set.")
 
         # Resolve path safely inside the sandbox
-        safe_path = os.path.abspath(os.path.join(self.sandbox_path, file_path.lstrip("/")))
+        safe_path = os.path.abspath(os.path.join(self.sandbox_path, relative_path.lstrip("/")))
         if not safe_path.startswith(os.path.abspath(self.sandbox_path)):
             raise Exception(f"Security Violation: Attempted to write outside sandbox ({safe_path})")
 
@@ -58,10 +61,10 @@ class DevAgent:
     async def run_compilation(self) -> dict:
         """
         Runs `npm run build` within the sandbox_path to verify compilation.
-        Returns the result as {"success": bool, "error_log": str}
+        Returns the result as {"success": bool, "log": str}
         """
         if not self.sandbox_path:
-            return {"success": False, "error_log": "Sandbox path not set."}
+            return {"success": False, "log": "Sandbox path not set."}
 
         logging.info(f"[DEV AGENT] Running compilation in {self.sandbox_path}")
         try:
@@ -74,12 +77,13 @@ class DevAgent:
             stdout, stderr = await process.communicate()
 
             if process.returncode == 0:
-                return {"success": True, "error_log": ""}
+                log_out = stdout.decode('utf-8') if stdout else ""
+                return {"success": True, "log": log_out}
             else:
                 error_log = stderr.decode('utf-8') or stdout.decode('utf-8')
-                return {"success": False, "error_log": error_log}
+                return {"success": False, "log": error_log}
         except Exception as e:
-            return {"success": False, "error_log": str(e)}
+            return {"success": False, "log": str(e)}
 
     async def execute_coding_task(self, tech_spec: str) -> Any:
         """
