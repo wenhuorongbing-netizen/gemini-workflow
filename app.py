@@ -664,8 +664,8 @@ async def run_workflow_engine(steps, workspace_id, stream_queue=None, profile_id
 
             step_type = step.get('type', 'standard')
 
-            # We only initialize Playwright bot for Scraper node or Agentic Loop which explicitly uses Gemini UI
-            needs_playwright = step_type in ['scraper', 'agentic_loop']
+            # We only initialize Playwright bot for Scraper node
+            needs_playwright = step_type == 'scraper'
             if needs_playwright:
                 if not current_bot or getattr(current_bot, 'profile_path', None) != (f"chrome_profile_{step_profile_id}" if step_profile_id != "1" else "chrome_profile"):
                     if page: await page.close()
@@ -827,24 +827,26 @@ async def run_workflow_engine(steps, workspace_id, stream_queue=None, profile_id
                     if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Gemini Working', 'message': f'Iteration {i+1}: Gemini generating coding prompt...', 'screen': 'left'})}\n\n"
 
                     # 1. Prompt Gemini
-                    if new_chat and i == 0:
-                        await current_bot.start_new_chat(page)
-                    elif i == 0 and chat_url and chat_url.startswith("https://gemini.google.com"):
-                        await current_bot.goto_specific_chat(page, chat_url)
+                    gemini_api_key = os.environ.get("GEMINI_API_KEY")
+                    if not gemini_api_key:
+                        gemini_response = "[FAILED] GEMINI_API_KEY is not set in environment."
+                        if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Error', 'message': gemini_response, 'screen': 'left'})}\n\n"
+                        break
 
-                    attachments = step.get('attachments', [])
-                    model_type = step.get('model', 'Auto')
-                    await current_bot.send_prompt(page, current_gemini_prompt, attachments=attachments, model=model_type)
+                    genai.configure(api_key=gemini_api_key)
+                    model_type = step.get('model', 'Pro')
+                    model_name = 'gemini-1.5-pro' if model_type == 'Pro' else 'gemini-1.5-flash'
+                    model = genai.GenerativeModel(model_name)
 
-                    # Poll for Gemini Output
-                    gemini_output_captured = {"text": ""}
-                    async def gemini_poll_cb(text):
-                        if text and text != gemini_output_captured["text"]:
-                            gemini_output_captured["text"] = text
-                            if stream_queue: await stream_queue.put(f"data: {json.dumps({'step': step_id, 'status': 'Gemini Output', 'message': text, 'screen': 'left'})}\n\n")
+                    gemini_response = ""
+                    response_stream = await model.generate_content_async(current_gemini_prompt, stream=True)
 
-                    await current_bot.wait_for_response(page, timeout=300000, poll_callback=gemini_poll_cb)
-                    gemini_response = await current_bot.get_last_response(page)
+                    async for chunk in response_stream:
+                        if cancel_event and cancel_event.is_set():
+                            raise asyncio.CancelledError("Workflow stopped by user.")
+                        if chunk.text:
+                            gemini_response += chunk.text
+                            if stream_queue: await stream_queue.put(f"data: {json.dumps({'step': step_id, 'status': 'Gemini Output', 'message': gemini_response, 'screen': 'left'})}\n\n")
 
                     accumulated_context += f"\n\nGemini: {gemini_response}"
 
@@ -1170,65 +1172,41 @@ sys.stdout.write(str(output))
                 concurrent_semaphore = asyncio.Semaphore(3)
 
                 async def process_item(item, item_index):
-                    item_page = None
-                    # Wait outside the try/finally so we don't accidentally close an un-acquired lock/unspawned page
                     await concurrent_semaphore.acquire()
                     try:
                         if cancel_event and cancel_event.is_set():
                             return f"[Item {item_index + 1} CANCELED]"
 
-                        item_page = await current_bot.create_new_page()
-
                         MAX_RETRIES = 3
                         for attempt in range(MAX_RETRIES):
                             try:
-                                if chat_url and chat_url.startswith('https://gemini.google.com/'):
-                                    # Instead of yield, we push to queue since this is an async function not generator
-                                    if stream_queue: await stream_queue.put(f"__STATUS__:Navigating item {item_index + 1} to specific chat URL...")
-                                    await current_bot.goto_specific_chat(item_page, chat_url)
-                                elif new_chat:
-                                    await current_bot.start_new_chat(item_page)
-
                                 final_prompt = prompt_template.replace('{{CURRENT_ITEM}}', item)
-                                # Use a safe lambda replacement as per memory instructions
-                                import re
                                 for past_id, past_output in results.items():
                                     tag = f"{{{{OUTPUT_{past_id}}}}}"
                                     if tag in final_prompt:
-                                        # Avoid re module for simple string replacements unless necessary, string.replace is safer for arbitrary texts
                                         final_prompt = final_prompt.replace(tag, past_output)
 
-                                attachments = step.get('attachments', [])
-                                model_type = step.get('model', 'Auto')
-                                await current_bot.send_prompt(item_page, final_prompt, attachments=attachments, model=model_type)
+                                gemini_api_key = os.environ.get("GEMINI_API_KEY")
+                                if not gemini_api_key:
+                                    return "[FAILED] GEMINI_API_KEY is not set in environment."
+
+                                genai.configure(api_key=gemini_api_key)
+                                model_type = step.get('model', 'Pro')
+                                model_name = 'gemini-1.5-pro' if model_type == 'Pro' else 'gemini-1.5-flash'
+                                model = genai.GenerativeModel(model_name)
 
                                 if cancel_event and cancel_event.is_set():
                                     return f"[Item {item_index + 1} CANCELED]"
 
-                                # Stream to queue for pseudo-streaming if needed
-                                async def item_poll_callback(partial_text):
+                                response_text = ""
+                                response_stream = await model.generate_content_async(final_prompt, stream=True)
+                                async for chunk in response_stream:
                                     if cancel_event and cancel_event.is_set():
                                         raise asyncio.CancelledError("Workflow stopped by user.")
-                                    if stream_queue: await stream_queue.put(partial_text)
+                                    if chunk.text:
+                                        response_text += chunk.text
+                                        if stream_queue: await stream_queue.put(response_text)
 
-                                wait_task = asyncio.create_task(current_bot.wait_for_response(item_page, poll_callback=item_poll_callback if stream_queue else None))
-
-                                while not wait_task.done():
-                                    try:
-                                        # Wait in loop but we don't consume queue from here, the pump_queue will do it.
-                                        await asyncio.wait_for(asyncio.sleep(0.5), timeout=0.5)
-                                    except asyncio.TimeoutError:
-                                        if cancel_event and cancel_event.is_set():
-                                            wait_task.cancel()
-                                            return f"[Item {item_index + 1} CANCELED]"
-                                        continue
-
-                                wait_task.result()
-
-                                if cancel_event and cancel_event.is_set():
-                                    return f"[Item {item_index + 1} CANCELED]"
-
-                                response_text = await current_bot.get_last_response(item_page)
                                 return response_text
 
                             except asyncio.CancelledError:
@@ -1238,13 +1216,10 @@ sys.stdout.write(str(output))
                                     logging.warning(f"Batch item {item_index + 1} failed, retrying {attempt + 1}: {str(e)}")
                                     if cancel_event and cancel_event.is_set():
                                         return f"[Item {item_index + 1} CANCELED]"
-                                    await item_page.reload()
                                 else:
                                     logging.error(f"Error in Batch item {item_index + 1}: {str(e)}")
                                     return f"[FAILED - Item {item_index + 1}] {str(e)}"
                     finally:
-                        if item_page:
-                            await item_page.close()
                         concurrent_semaphore.release()
 
                 tasks = [process_item(item, i) for i, item in enumerate(items)]
