@@ -783,15 +783,16 @@ async def run_devhouse_autopilot(task_id, initial_prompt, attachments, target_re
         if os.path.exists(workspace_dir):
             subprocess.run(["rm", "-rf", workspace_dir], check=True)
 
-        git_token = os.environ.get("GITHUB_TOKEN", "")
+        from utils.secrets import SecretManager
+        git_token = SecretManager.get_github_token()
         clone_url = f"https://oauth2:{git_token}@github.com/{target_repo}.git" if git_token else f"https://github.com/{target_repo}.git"
 
         try:
             subprocess.run(["git", "clone", clone_url, workspace_dir], check=True, capture_output=True, text=True)
         except subprocess.CalledProcessError as e:
             # Mask the token from the exception message
-            error_msg = str(e).replace(git_token, "[REDACTED_TOKEN]") if git_token else str(e)
-            stderr_masked = e.stderr.replace(git_token, "[REDACTED_TOKEN]") if e.stderr and git_token else e.stderr
+            error_msg = SecretManager.mask_secrets(str(e))
+            stderr_masked = SecretManager.mask_secrets(e.stderr) if e.stderr else ""
             raise Exception(f"Failed to clone repository: {error_msg}. Stderr: {stderr_masked}")
 
         await devhouse_queue.put({"type": "info", "message": f"[SYSTEM] Indexing repository for Codebase RAG..."})
@@ -967,12 +968,15 @@ async def run_devhouse_autopilot(task_id, initial_prompt, attachments, target_re
             empty_diff_count = 0 # Reset on success
 
             # The Local CI Oracle Phase
-            await devhouse_queue.put({"type": "ci", "message": "[CI] Compiling project... (npm run build)"})
+            await devhouse_queue.put({"type": "ci", "message": "[CI] Compiling project... (npm run build in Docker)"})
             import asyncio
+            import uuid
+            container_name = f"ci_build_{uuid.uuid4().hex[:8]}"
             try:
                  ci_process = await asyncio.create_subprocess_exec(
-                      "npm", "run", "build",
-                      cwd=workspace_dir,
+                      "docker", "run", "--rm", "--name", container_name,
+                      "-v", f"{os.path.abspath(workspace_dir)}:/app", "-w", "/app",
+                      "node:18-alpine", "npm", "run", "build",
                       stdout=asyncio.subprocess.PIPE,
                       stderr=asyncio.subprocess.PIPE
                  )
@@ -981,10 +985,10 @@ async def run_devhouse_autopilot(task_id, initial_prompt, attachments, target_re
                       stdout_bytes, stderr_bytes = await asyncio.wait_for(ci_process.communicate(), timeout=120.0)
                  except asyncio.TimeoutError:
                       try:
-                          ci_process.kill()
-                      except OSError:
+                          kill_proc = await asyncio.create_subprocess_exec("docker", "rm", "-f", container_name, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+                          await kill_proc.communicate()
+                      except Exception:
                           pass
-                      await ci_process.communicate()
                       await devhouse_queue.put({"type": "ci_failed", "message": "[CI] ❌ Build Timeout (120s)! Sending failure back to Developer."})
                       jules_instruction = f"[SYSTEM CI ALERT] The code you just wrote caused a build timeout (exceeded 120 seconds). Fix any infinite loops or build hang issues."
 
@@ -1013,8 +1017,8 @@ async def run_devhouse_autopilot(task_id, initial_prompt, attachments, target_re
                           jules_instruction = f"Your previous code caused a CI spiral and was rolled back. Re-attempt the feature from scratch, ensuring it compiles properly. Original Request:\n{initial_prompt}"
                           continue
 
-                      stderr = stderr_bytes.decode()
-                      stdout_str = stdout_bytes.decode()
+                      stderr = stderr_bytes.decode() if stderr_bytes else ""
+                      stdout_str = stdout_bytes.decode() if stdout_bytes else ""
                       stdout_lines = "\n".join(stdout_str.splitlines()[-50:]) if stdout_str else ""
 
                       jules_instruction = f"[SYSTEM CI ALERT] The code you just wrote caused a build failure. Do NOT write new features. Fix the compilation errors immediately based on this stack trace:\n\nSTDERR:\n{stderr}\n\nSTDOUT (Last 50 lines):\n{stdout_lines}"
@@ -1074,31 +1078,37 @@ async def run_devhouse_autopilot(task_id, initial_prompt, attachments, target_re
                     with open(test_file_path, "w") as f:
                         f.write(test_script_content)
 
-                    await devhouse_queue.put({"type": "info", "message": f"[QA] ⚙️ Running generated TDD tests..."})
+                    await devhouse_queue.put({"type": "info", "message": f"[QA] ⚙️ Running generated TDD tests (in Docker)..."})
 
+                    import uuid
+                    test_container_name = f"qa_test_{uuid.uuid4().hex[:8]}"
                     try:
                         test_proc = await asyncio.create_subprocess_exec(
-                            "npm", "run", "test",
-                            cwd=workspace_dir,
-                            env={"PATH": os.environ.get("PATH", "")}, # Secure Enclave: Strip all other host env variables
+                            "docker", "run", "--rm", "--network", "none", "--name", test_container_name,
+                            "-v", f"{os.path.abspath(workspace_dir)}:/app", "-w", "/app",
+                            "node:18-alpine", "npm", "run", "test",
                             stdout=asyncio.subprocess.PIPE,
                             stderr=asyncio.subprocess.PIPE
                         )
                         test_stdout, test_stderr = await asyncio.wait_for(test_proc.communicate(), timeout=60.0)
                     except asyncio.TimeoutError:
-                        test_proc.kill()
-                        error_msg = "[SECURITY ALERT] Code execution breached sandbox constraints (Timeout)."
+                        try:
+                            kill_proc = await asyncio.create_subprocess_exec("docker", "rm", "-f", test_container_name, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+                            await kill_proc.communicate()
+                        except Exception:
+                            pass
+                        error_msg = "[SECURITY ALERT] QA test execution breached sandbox constraints (Timeout)."
                         logging.error(error_msg)
                         await devhouse_queue.put({"type": "error", "message": f"[QA] 🛑 {error_msg}"})
                         raise Exception(error_msg)
                     except PermissionError as e:
-                        error_msg = f"[SECURITY ALERT] Code execution breached sandbox constraints (PermissionError): {e}"
+                        error_msg = f"[SECURITY ALERT] QA test execution breached sandbox constraints (PermissionError): {e}"
                         logging.error(error_msg)
                         await devhouse_queue.put({"type": "error", "message": f"[QA] 🛑 {error_msg}"})
                         raise Exception(error_msg)
 
                     if test_proc.returncode != 0:
-                        test_error = test_stderr.decode('utf-8') or test_stdout.decode('utf-8')
+                        test_error = (test_stderr.decode('utf-8') if test_stderr else "") or (test_stdout.decode('utf-8') if test_stdout else "")
                         await devhouse_queue.put({"type": "error", "message": f"[QA] 🛑 TDD Gate Failed:\n{test_error}"})
                         jules_instruction = f"[QA REJECTION] Fix the code so it passes the QA test. Here is the failing test error:\n{test_error}"
 
@@ -1909,16 +1919,62 @@ async def run_workflow_engine(steps, workspace_id, stream_queue=None, profile_id
                     prev_step_id = ""
                 prev_input = results.get(prev_step_id, "")
 
-                local_vars = {'input': prev_input, 'output': ''}
+                import tempfile
+                import uuid
+                # Use a securely scoped temporary script execution mechanism
                 try:
-                    # Caution: Exec is dangerous in generic web apps, but for local-first assistant tools it provides extreme power.
-                    exec(final_script, {}, local_vars)
-                    py_output = local_vars.get('output', '')
-                    results[str(step_id)] = str(py_output)
+                    with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as tmp_script:
+                        # Wrap the user script to automatically expose input and capture output
+                        wrapped_script = f"""
+import sys
+
+input = {repr(prev_input)}
+output = ""
+
+{final_script}
+
+sys.stdout.write(str(output))
+"""
+                        tmp_script.write(wrapped_script)
+                        tmp_script_path = tmp_script.name
+
+                    container_name = f"py_exec_{uuid.uuid4().hex[:8]}"
+
+                    # Sandbox the execution using Docker
+                    py_proc = await asyncio.create_subprocess_exec(
+                        "docker", "run", "--rm", "--network", "none", "--name", container_name,
+                        "-v", f"{tmp_script_path}:/script.py:ro",
+                        "python:3.10-slim", "python", "/script.py",
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE
+                    )
+
+                    try:
+                        stdout_data, stderr_data = await asyncio.wait_for(py_proc.communicate(), timeout=10.0)
+                    except asyncio.TimeoutError:
+                        try:
+                            kill_proc = await asyncio.create_subprocess_exec("docker", "rm", "-f", container_name, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+                            await kill_proc.communicate()
+                        except Exception:
+                            pass
+                        raise Exception("Python script execution timed out (exceeded 10 seconds).")
+
+                    if py_proc.returncode != 0:
+                        err_msg = stderr_data.decode() if stderr_data else "Unknown error"
+                        raise Exception(err_msg)
+
+                    py_output = stdout_data.decode() if stdout_data else ""
+                    results[str(step_id)] = py_output
                     if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Complete', 'result': results[str(step_id)], 'show_result': show_result})}\n\n"
                 except Exception as e:
                     results[str(step_id)] = f"[PYTHON ERROR] {str(e)}"
                     if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Error', 'result': results[str(step_id)]})}\n\n"
+                finally:
+                    if 'tmp_script_path' in locals() and os.path.exists(tmp_script_path):
+                        try:
+                            os.remove(tmp_script_path)
+                        except Exception:
+                            pass
 
                 index += 1
                 continue
