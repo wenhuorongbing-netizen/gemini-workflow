@@ -81,74 +81,7 @@ enforce_repository_hygiene()
 
 dotenv.load_dotenv()
 
-GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
-GITHUB_REPO = os.environ.get("GITHUB_REPO", "")
-
-gh_client = Github(GITHUB_TOKEN) if GITHUB_TOKEN else None
-
-class AuthException(Exception):
-    pass
-
-def get_github_repo(target_repo=None):
-    repo_name = target_repo if target_repo else GITHUB_REPO
-    if not gh_client or not repo_name:
-        raise AuthException("Please add a valid GITHUB_TOKEN to your .env file or provide target_repo")
-    from github.GithubException import GithubException
-    try:
-        return gh_client.get_repo(repo_name)
-    except GithubException as e:
-        if e.status == 401:
-            raise AuthException("Please add a valid GITHUB_TOKEN to your .env file")
-        raise e
-
-def create_feature_branch(base_branch="main", new_branch_name=None, target_repo=None):
-    if not new_branch_name:
-        raise ValueError("new_branch_name is required")
-    repo = get_github_repo(target_repo)
-    base_ref = repo.get_git_ref(f"heads/{base_branch}")
-    repo.create_git_ref(ref=f"refs/heads/{new_branch_name}", sha=base_ref.object.sha)
-    return new_branch_name
-
-def get_branch_diff(base_branch="main", compare_branch=None, target_repo=None):
-    if not compare_branch:
-         raise ValueError("compare_branch is required")
-    repo = get_github_repo(target_repo)
-    comparison = repo.compare(base_branch, compare_branch)
-    diff = []
-    for file in comparison.files:
-        filename = file.filename
-        if (
-            filename.endswith("package-lock.json") or
-            filename.endswith("yarn.lock") or
-            filename.endswith(".svg") or
-            filename.endswith(".png") or
-            ".next/" in filename or
-            "node_modules/" in filename
-        ):
-            continue
-        diff.append(f"File: {file.filename}\nStatus: {file.status}\nDiff:\n{file.patch}\n")
-    return "\n".join(diff)
-
-def merge_and_delete_branch(head_branch, base_branch="main", target_repo=None):
-    repo = get_github_repo(target_repo)
-
-    # Check if there is a diff first
-    comparison = repo.compare(base_branch, head_branch)
-    if comparison.ahead_by == 0:
-        return {"status": "success", "message": "Nothing to merge (branches are identical).", "merged": False}
-
-    # Attempt to merge
-    try:
-        merge_msg = f"Auto-merge {head_branch} into {base_branch}"
-        merge_result = repo.merge(base_branch, head_branch, merge_msg)
-
-        # Delete the branch
-        ref = repo.get_git_ref(f"heads/{head_branch}")
-        ref.delete()
-        return {"status": "success", "message": "Branch merged and deleted successfully.", "merged": True, "sha": merge_result.sha}
-    except Exception as e:
-         return {"status": "error", "message": f"Merge failed: {str(e)}", "merged": False}
-
+from utils.git_helpers import AuthException, get_branch_diff, merge_and_delete_branch
 
 app = FastAPI()
 
@@ -626,749 +559,9 @@ async def api_devhouse_review(request: Request):
     except Exception as e:
         return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
 
-devhouse_lock = asyncio.Lock()
-devhouse_queue = asyncio.Queue()
-
-# --- PHASE 2: UAT GATE EVENT ---
-uat_approval_event = asyncio.Event()
-uat_decision = {"approved": False}
-
-def init_devhouse_queue_db():
-    import sqlite3
-    import os
-    db_path = os.path.join(os.path.dirname(__file__), 'dev.db')
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS DevHouseQueue (
-            id TEXT PRIMARY KEY,
-            prompt TEXT,
-            target_repo TEXT,
-            kb_links TEXT,
-            model TEXT,
-            webhook_url TEXT,
-            status TEXT,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    try:
-        cursor.execute("ALTER TABLE DevHouseQueue ADD COLUMN agent_state TEXT DEFAULT 'PLANNING'")
-    except sqlite3.OperationalError:
-        pass # Column already exists
-
-    # Also we want to track the overall loop state persistence (e.g. jules context, iterations)
-    try:
-        cursor.execute("ALTER TABLE DevHouseQueue ADD COLUMN accumulated_context TEXT DEFAULT ''")
-    except sqlite3.OperationalError:
-        pass
-
-    try:
-        cursor.execute("ALTER TABLE DevHouseQueue ADD COLUMN iteration INTEGER DEFAULT 0")
-    except sqlite3.OperationalError:
-        pass
-
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS CorporateMemory (
-            id TEXT PRIMARY KEY,
-            category TEXT,
-            error_pattern TEXT,
-            solution TEXT,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    conn.commit()
-    conn.close()
-
-init_devhouse_queue_db()
-
-def scan_repo_structure(sandbox_path):
-    import os
-
-    file_tree = []
-    valid_extensions = {'.py', '.ts', '.tsx', '.js'}
-    ignored_dirs = {'node_modules', '.git', '__pycache__', '.next', 'build', 'dist', 'out'}
-
-    for root, dirs, files in os.walk(sandbox_path):
-        dirs[:] = [d for d in dirs if d not in ignored_dirs and not d.startswith('.')]
-        level = root.replace(sandbox_path, '').count(os.sep)
-        indent = ' ' * 4 * (level)
-        if root != sandbox_path:
-            file_tree.append(f"{indent}{os.path.basename(root)}/")
-
-        subindent = ' ' * 4 * (level + 1)
-        for f in files:
-            if os.path.splitext(f)[1] in valid_extensions:
-                file_tree.append(f"{subindent}{f}")
-
-    if not file_tree:
-        return "No relevant files found."
-
-    return "\n".join(file_tree)
-
-def index_repository(repo_path, prompt):
-    import os
-    from rank_bm25 import BM25Okapi
-
-    docs = []
-    file_paths = []
-
-    valid_extensions = {'.py', '.ts', '.tsx', '.js'}
-    ignored_dirs = {'node_modules', '.git', '__pycache__', '.next', 'build', 'dist', 'out'}
-
-    for root, dirs, files in os.walk(repo_path):
-        dirs[:] = [d for d in dirs if d not in ignored_dirs and not d.startswith('.')]
-        for file in files:
-            ext = os.path.splitext(file)[1]
-            if ext in valid_extensions:
-                filepath = os.path.join(root, file)
-                try:
-                    with open(filepath, 'r', encoding='utf-8') as f:
-                        content = f.read()
-                        # Simple chunking by file for now
-                        docs.append(content)
-                        file_paths.append(filepath.replace(repo_path, '').lstrip('/'))
-                except Exception:
-                    pass
-
-    if not docs:
-        return "No relevant source files found."
-
-    tokenized_docs = [doc.split(" ") for doc in docs]
-    bm25 = BM25Okapi(tokenized_docs)
-
-    tokenized_query = prompt.split(" ")
-
-    top_n = min(5, len(docs))
-    top_docs = bm25.get_top_n(tokenized_query, docs, n=top_n)
-
-    radar_report = "--- RADAR REPORT: TOP RELEVANT FILES ---\n\n"
-    for i, doc in enumerate(top_docs):
-        # find original filepath
-        idx = docs.index(doc)
-        radar_report += f"File: {file_paths[idx]}\nSnippet (first 500 chars):\n{doc[:500]}...\n\n"
-
-    return radar_report
-
-async def run_devhouse_autopilot(task_id, initial_prompt, attachments, target_repo, kb_links, model_type, max_iterations=5):
-    import datetime
-    import time
-    import google.generativeai as genai
-    import bot
-    import os
-    import subprocess
-    from agents import PMAgent, DevAgent, QAAgent, SecOpsAgent
-
-    pm_tokens_burned = 0
-    dev_tokens_burned = 0
-    iteration = 0
-
-    branch_name = f"devhouse-{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}"
-    jules_bot = None
-    jules_page = None
-
-    # Extract Repo info
-    repo_name = target_repo.split('/')[-1].replace('.git', '')
-    import uuid
-    run_id = str(uuid.uuid4())
-    workspace_dir = f"/tmp/devhouse_workspaces/{run_id}/"
-
-    try:
-        await devhouse_queue.put({"type": "info", "message": f"[PM] Analyzing requirements for Auto-Dev loop..."})
-
-        await devhouse_queue.put({"type": "action", "message": f"[DEV] Cloning {target_repo} into Sandbox..."})
-
-        # Phase 3: Clone Sandbox
-        os.makedirs("/tmp/devhouse_workspaces", exist_ok=True)
-        if os.path.exists(workspace_dir):
-            subprocess.run(["rm", "-rf", workspace_dir], check=True)
-
-        from utils.secrets import SecretManager
-        git_token = SecretManager.get_github_token()
-        clone_url = f"https://oauth2:{git_token}@github.com/{target_repo}.git" if git_token else f"https://github.com/{target_repo}.git"
-
-        try:
-            subprocess.run(["git", "clone", clone_url, workspace_dir], check=True, capture_output=True, text=True)
-        except subprocess.CalledProcessError as e:
-            # Mask the token from the exception message
-            error_msg = SecretManager.mask_secrets(str(e))
-            stderr_masked = SecretManager.mask_secrets(e.stderr) if e.stderr else ""
-            raise Exception(f"Failed to clone repository: {error_msg}. Stderr: {stderr_masked}")
-
-        await devhouse_queue.put({"type": "info", "message": f"[SYSTEM] Indexing repository for Codebase RAG..."})
-        radar_report = index_repository(workspace_dir, initial_prompt)
-
-        # Phase 4: File tree scan
-        repo_structure = scan_repo_structure(workspace_dir)
-
-        await devhouse_queue.put({"type": "radar", "message": f"Radar mapped {workspace_dir}"})
-
-        await devhouse_queue.put({"type": "action", "message": f"[PM] Generating initial technical spec..."})
-        pm_agent = PMAgent(workspace_dir, run_id, model_type)
-        qa_agent = QAAgent(pm_agent.get_model())
-        secops_agent = SecOpsAgent(pm_agent.get_model())
-
-        import sqlite3
-        import os
-        db_path = os.path.join(os.path.dirname(__file__), 'dev.db')
-
-        # Load Corporate Memory
-        corporate_memory_context = ""
-        try:
-            conn = sqlite3.connect(db_path)
-            cursor = conn.cursor()
-            cursor.execute("SELECT category, error_pattern, solution FROM CorporateMemory ORDER BY created_at DESC LIMIT 5")
-            memories = cursor.fetchall()
-            conn.close()
-            if memories:
-                memory_lines = []
-                for idx, mem in enumerate(memories):
-                    memory_lines.append(f"Memory {idx+1} ({mem[0]}):\nPattern to Avoid: {mem[1]}\nSolution: {mem[2]}\n")
-                corporate_memory_context = "\n".join(memory_lines)
-                await devhouse_queue.put({"type": "info", "message": f"[MEMORY] Loaded {len(memories)} recent Corporate Memories to avoid past mistakes."})
-        except Exception as e:
-            logging.warning(f"Failed to load corporate memory: {e}")
-
-        initial_spec, spec_tokens, spec_usage = pm_agent.generate_initial_spec(initial_prompt, radar_report, kb_links, corporate_memory=corporate_memory_context, attachments=attachments)
-        pm_tokens_burned += spec_tokens
-        log_telemetry(task_id, "PM", spec_usage)
-
-        await devhouse_queue.put({"type": "action", "message": f"[DEV] Spawning Jules..."})
-
-        jules_bot = bot.JulesBot(profile_id="1")
-        jules_page = await jules_bot.create_new_page()
-        dev_agent = DevAgent(jules_bot, jules_page)
-
-        # Prepare the first instruction for Jules
-        jules_instruction = f"Technical Spec: {initial_spec}\nKnowledge Base: {kb_links}\nBranch: {branch_name}\n\n--- REPO STRUCTURE ---\n{repo_structure}\n\n{radar_report}\n\nIMPORTANT MANDATE: You are operating in a sandbox. The target codebase is located exclusively at: `{workspace_dir}`. All bash commands, file modifications, and git operations MUST be executed within `{workspace_dir}`. Do NOT edit the local engine files."
-
-        accumulated_context = jules_instruction
-        import sqlite3
-        import os
-
-        async def update_agent_state(state: str):
-            try:
-                db_path = os.path.join(os.path.dirname(__file__), 'dev.db')
-                conn = sqlite3.connect(db_path)
-                cursor = conn.cursor()
-                cursor.execute("UPDATE DevHouseQueue SET agent_state = ?, updated_at = datetime('now') WHERE id = ?", (state, task_id))
-                conn.commit()
-                conn.close()
-                await devhouse_queue.put({"type": "state_change", "newState": state})
-            except Exception as e:
-                logging.error(f"Failed to update agent state: {e}")
-
-        def save_state(count, ctx, status):
-            try:
-                db_path = os.path.join(os.path.dirname(__file__), 'dev.db')
-                conn = sqlite3.connect(db_path)
-                cursor = conn.cursor()
-                cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS DevHouseState (
-                        id TEXT PRIMARY KEY,
-                        branch TEXT,
-                        iteration INTEGER,
-                        max_iterations INTEGER,
-                        accumulated_context TEXT,
-                        status TEXT,
-                        updatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
-                    )
-                """)
-                cursor.execute("""
-                    INSERT OR REPLACE INTO DevHouseState (id, branch, iteration, max_iterations, accumulated_context, status, updatedAt)
-                    VALUES ('active', ?, ?, ?, ?, ?, datetime('now'))
-                """, (branch_name, count, max_iterations, ctx, status))
-                cursor.execute("UPDATE DevHouseQueue SET accumulated_context = ?, iteration = ? WHERE id = ?", (ctx, count, task_id))
-                conn.commit()
-                conn.close()
-            except Exception as e:
-                logging.error(f"Failed to save DevHouse state: {e}")
-
-        start_iteration = 1
-
-        # Check if we are resuming from DB
-        try:
-            conn = sqlite3.connect(db_path)
-            cursor = conn.cursor()
-            cursor.execute("SELECT agent_state, accumulated_context, iteration FROM DevHouseQueue WHERE id = ?", (task_id,))
-            row = cursor.fetchone()
-            conn.close()
-            if row and row[0]:
-                db_state = row[0]
-                if db_state not in ['PLANNING', 'DEPLOYED', 'FAILED'] and row[1]:
-                    await devhouse_queue.put({"type": "info", "message": f"[SYSTEM] Resuming task from state: {db_state}"})
-                    accumulated_context = row[1]
-                    start_iteration = row[2] or 1
-                    jules_instruction = accumulated_context # Restore the active instruction loop
-
-                    if not os.path.exists(workspace_dir):
-                        subprocess.run(["git", "clone", clone_url, workspace_dir], check=True, capture_output=True, text=True)
-                        subprocess.run(["git", "checkout", branch_name], cwd=workspace_dir, check=True)
-        except Exception as e:
-            logging.error(f"Failed to load resume state: {e}")
-
-        if start_iteration == 1 and not os.path.exists(os.path.join(workspace_dir, ".git")):
-             create_feature_branch("main", branch_name, target_repo)
-
-        save_state(start_iteration, accumulated_context, 'running')
-        await update_agent_state("CODING")
-
-        empty_diff_count = 0
-
-        iteration = start_iteration
-        max_fix_iterations = 3
-        fix_count = 0
-
-        while iteration <= max_iterations:
-            # Phase 3: Git Time-Machine - Tag safe commit before Jules acts
-            try:
-                # Get the current commit hash
-                hash_proc = subprocess.run(["git", "rev-parse", "HEAD"], cwd=workspace_dir, capture_output=True, text=True, check=True)
-                safe_commit_hash = hash_proc.stdout.strip()
-            except Exception as e:
-                safe_commit_hash = None
-                logging.warning(f"Failed to capture safe commit hash: {e}")
-
-            await devhouse_queue.put({"type": "info", "message": f"[DEV] Iteration {iteration}/{max_iterations}: Sending instructions to Jules..."})
-            save_state(iteration, accumulated_context, 'running')
-
-            # 15-Minute Watchdog Wrappers
-            try:
-                # Step A & B: Send task to Jules and wait
-                await devhouse_queue.put({"type": "info", "message": f"[DEV] Iteration {iteration}/{max_iterations}: Writing code... Waiting for 'Ready for Review'."})
-                jules_status, dev_tokens, dev_usage = await asyncio.wait_for(dev_agent.execute_task(jules_instruction), timeout=900)
-                dev_tokens_burned += dev_tokens
-                log_telemetry(task_id, "DEV", dev_usage)
-
-                if not jules_status:
-                    raise Exception("Timeout waiting for Jules to finish task.")
-
-            except asyncio.TimeoutError:
-                await devhouse_queue.put({"type": "error", "message": f"[WATCHDOG] Process hung for 15 minutes, hard resetting Jules browser..."})
-                logging.error("[WATCHDOG] Process hung, hard resetting...")
-                await jules_bot.quit()
-                jules_bot = bot.JulesBot(profile_id="1")
-                jules_page = await jules_bot.create_new_page()
-                dev_agent = DevAgent(jules_bot, jules_page)
-                continue # Retry this iteration
-
-            await devhouse_queue.put({"type": "action", "message": f"[GIT] Code pushed by Jules. Fetching diff for branch '{branch_name}'..."})
-
-            # Step C: Get Diff
-            diff = get_branch_diff("main", branch_name, target_repo)
-
-            if not diff.strip():
-                empty_diff_count += 1
-                await devhouse_queue.put({"type": "info", "message": f"[SYSTEM WARNING] No code changes detected. Attempt {empty_diff_count}/2."})
-                if empty_diff_count >= 2:
-                    raise Exception("Jules failed to push code twice.")
-                jules_instruction = "You failed to commit any code. You must implement the changes and push."
-                continue
-
-            empty_diff_count = 0 # Reset on success
-
-            # The Local CI Oracle Phase
-            await devhouse_queue.put({"type": "ci", "message": "[CI] Compiling project... (npm run build in Docker)"})
-            import asyncio
-            import uuid
-            container_name = f"ci_build_{uuid.uuid4().hex[:8]}"
-            try:
-                 ci_process = await asyncio.create_subprocess_exec(
-                      "docker", "run", "--rm", "--name", container_name,
-                      "-v", f"{os.path.abspath(workspace_dir)}:/app", "-w", "/app",
-                      "node:18-alpine", "npm", "run", "build",
-                      stdout=asyncio.subprocess.PIPE,
-                      stderr=asyncio.subprocess.PIPE
-                 )
-
-                 try:
-                      stdout_bytes, stderr_bytes = await asyncio.wait_for(ci_process.communicate(), timeout=120.0)
-                 except asyncio.TimeoutError:
-                      try:
-                          kill_proc = await asyncio.create_subprocess_exec("docker", "rm", "-f", container_name, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
-                          await kill_proc.communicate()
-                      except Exception:
-                          pass
-                      await devhouse_queue.put({"type": "ci_failed", "message": "[CI] ❌ Build Timeout (120s)! Sending failure back to Developer."})
-                      jules_instruction = f"[SYSTEM CI ALERT] The code you just wrote caused a build timeout (exceeded 120 seconds). Fix any infinite loops or build hang issues."
-
-                      fix_count += 1
-                      if fix_count > max_fix_iterations:
-                          raise Exception("Jules failed to fix CI errors after 3 attempts.")
-                      continue
-
-                 returncode = ci_process.returncode
-                 if returncode != 0:
-                      await devhouse_queue.put({"type": "ci_failed", "message": "[CI] ❌ Build Failed! Sending stack trace back to Developer."})
-
-                      fix_count += 1
-
-                      # Phase 3: Git Time-Machine Rollback
-                      if fix_count >= 2 and safe_commit_hash:
-                          await devhouse_queue.put({"type": "error", "message": f"[TIME-MACHINE] ⚠️ Jules entered an error spiral. Rolling back to previous stable commit..."})
-                          try:
-                              subprocess.run(["git", "reset", "--hard", safe_commit_hash], cwd=workspace_dir, check=True)
-                          except Exception as e:
-                              logging.error(f"Time-Machine Rollback failed: {e}")
-
-                          # Reset fix count so Jules gets another chance at the feature from a clean slate
-                          fix_count = 0
-                          # Clear the specific CI error loop instruction
-                          jules_instruction = f"Your previous code caused a CI spiral and was rolled back. Re-attempt the feature from scratch, ensuring it compiles properly. Original Request:\n{initial_prompt}"
-                          continue
-
-                      stderr = stderr_bytes.decode() if stderr_bytes else ""
-                      stdout_str = stdout_bytes.decode() if stdout_bytes else ""
-                      stdout_lines = "\n".join(stdout_str.splitlines()[-50:]) if stdout_str else ""
-
-                      jules_instruction = f"[SYSTEM CI ALERT] The code you just wrote caused a build failure. Do NOT write new features. Fix the compilation errors immediately based on this stack trace:\n\nSTDERR:\n{stderr}\n\nSTDOUT (Last 50 lines):\n{stdout_lines}"
-
-                      if fix_count > max_fix_iterations:
-                          raise Exception("Jules failed to fix CI errors after 3 attempts.")
-                      continue # Re-run the iteration without incrementing counter
-                 else:
-                      fix_count = 0
-                      await devhouse_queue.put({"type": "ci_success", "message": "[CI] ✅ Build Passed! Proceeding to Agent Swarm Validation."})
-            except Exception as e:
-                 await devhouse_queue.put({"type": "error", "message": f"[CI] ❌ Unknown Execution Error: {e}"})
-                 raise e
-
-            # ==========================================
-            # V41 Phase 1 & 2: The Agent Swarm & TDD Gate
-            # ==========================================
-            try:
-                # 1. SecOps Agent Review
-                await update_agent_state("SECOPS_AUDIT")
-                await devhouse_queue.put({"type": "info", "message": f"[SECOPS] 🛡️ SecOps Agent analyzing diff for vulnerabilities..."})
-
-                secops_text, sec_tokens, sec_usage = secops_agent.analyze_diff(latest_diff)
-                pm_tokens_burned += sec_tokens
-                log_telemetry(task_id, "SECOPS", sec_usage)
-
-                if "APPROVED" not in secops_text.upper():
-                    await devhouse_queue.put({"type": "error", "message": f"[SECOPS] 🛑 Security Violation Detected:\n{secops_text}"})
-                    jules_instruction = f"[SECOPS REJECTION] Fix the following security vulnerabilities immediately:\n{secops_text}"
-
-                    # Store Corporate Memory
-                    import uuid
-                    try:
-                        conn = sqlite3.connect(db_path)
-                        c = conn.cursor()
-                        c.execute("INSERT INTO CorporateMemory (id, category, error_pattern, solution) VALUES (?, ?, ?, ?)",
-                                  (f"mem-{uuid.uuid4().hex[:8]}", "SECOPS", "Security Vulnerability detected in code diff", secops_text))
-                        conn.commit()
-                        conn.close()
-                    except Exception as e:
-                        logging.warning(f"Failed to store SECOPS memory: {e}")
-
-                    continue
-
-                await devhouse_queue.put({"type": "ci_success", "message": "[SECOPS] ✅ Security check passed."})
-
-                # 2. QA Agent Review & TDD Test Generation
-                await update_agent_state("QA_AUDIT")
-                await devhouse_queue.put({"type": "info", "message": f"[QA] 🧪 QA Agent generating TDD test cases..."})
-
-                test_script_content, qa_tokens, qa_usage = qa_agent.generate_tests(latest_diff)
-                pm_tokens_burned += qa_tokens
-                log_telemetry(task_id, "QA", qa_usage)
-
-                if test_script_content:
-                    test_file_path = os.path.join(workspace_dir, "devhouse_swarm_test.spec.js") # For NPM run test compliance
-                    with open(test_file_path, "w") as f:
-                        f.write(test_script_content)
-
-                    await devhouse_queue.put({"type": "info", "message": f"[QA] ⚙️ Running generated TDD tests (in Docker)..."})
-
-                    import uuid
-                    test_container_name = f"qa_test_{uuid.uuid4().hex[:8]}"
-                    try:
-                        test_proc = await asyncio.create_subprocess_exec(
-                            "docker", "run", "--rm", "--network", "none", "--name", test_container_name,
-                            "-v", f"{os.path.abspath(workspace_dir)}:/app", "-w", "/app",
-                            "node:18-alpine", "npm", "run", "test",
-                            stdout=asyncio.subprocess.PIPE,
-                            stderr=asyncio.subprocess.PIPE
-                        )
-                        test_stdout, test_stderr = await asyncio.wait_for(test_proc.communicate(), timeout=60.0)
-                    except asyncio.TimeoutError:
-                        try:
-                            kill_proc = await asyncio.create_subprocess_exec("docker", "rm", "-f", test_container_name, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
-                            await kill_proc.communicate()
-                        except Exception:
-                            pass
-                        error_msg = "[SECURITY ALERT] QA test execution breached sandbox constraints (Timeout)."
-                        logging.error(error_msg)
-                        await devhouse_queue.put({"type": "error", "message": f"[QA] 🛑 {error_msg}"})
-                        raise Exception(error_msg)
-                    except PermissionError as e:
-                        error_msg = f"[SECURITY ALERT] QA test execution breached sandbox constraints (PermissionError): {e}"
-                        logging.error(error_msg)
-                        await devhouse_queue.put({"type": "error", "message": f"[QA] 🛑 {error_msg}"})
-                        raise Exception(error_msg)
-
-                    if test_proc.returncode != 0:
-                        test_error = (test_stderr.decode('utf-8') if test_stderr else "") or (test_stdout.decode('utf-8') if test_stdout else "")
-                        await devhouse_queue.put({"type": "error", "message": f"[QA] 🛑 TDD Gate Failed:\n{test_error}"})
-                        jules_instruction = f"[QA REJECTION] Fix the code so it passes the QA test. Here is the failing test error:\n{test_error}"
-
-                        # Store Corporate Memory
-                        import uuid
-                        try:
-                            conn = sqlite3.connect(db_path)
-                            c = conn.cursor()
-                            c.execute("INSERT INTO CorporateMemory (id, category, error_pattern, solution) VALUES (?, ?, ?, ?)",
-                                      (f"mem-{uuid.uuid4().hex[:8]}", "QA", "TDD Test Failure", test_error))
-                            conn.commit()
-                            conn.close()
-                        except Exception as e:
-                            logging.warning(f"Failed to store QA memory: {e}")
-
-                        continue
-
-                    await devhouse_queue.put({"type": "ci_success", "message": "[QA] ✅ TDD tests passed!"})
-                else:
-                    await devhouse_queue.put({"type": "info", "message": "[QA] ⚠️ No test block generated. Proceeding to PM."})
-
-            except Exception as e:
-                 await devhouse_queue.put({"type": "error", "message": f"[SWARM] ❌ Swarm execution error: {e}"})
-                 raise e
-
-            # Phase 2: Live Preview Engine & UAT Gate
-            await update_agent_state("UAT_GATE")
-            await devhouse_queue.put({"type": "info", "message": "[SYSTEM] Spinning up Live Preview Engine (npm run dev)..."})
-            preview_process = None
-
-            # Kill any existing process on port 3005 before starting
-            try:
-                kill_proc = await asyncio.create_subprocess_shell("kill $(lsof -t -i:3005) 2>/dev/null || true")
-                await kill_proc.communicate()
-            except Exception as e:
-                logging.warning(f"Error attempting to kill port 3005: {e}")
-
-            try:
-                preview_process = await asyncio.create_subprocess_exec(
-                    "npm", "run", "dev", "--", "-p", "3005",
-                    cwd=workspace_dir,
-                    stdout=asyncio.subprocess.DEVNULL,
-                    stderr=asyncio.subprocess.DEVNULL
-                )
-
-                # Give the dev server a few seconds to bind
-                await asyncio.sleep(5)
-
-                # Automated UAT Visual Diff Thumbnail capture
-                try:
-                    from playwright.async_api import async_playwright
-                    await devhouse_queue.put({"type": "info", "message": "[SYSTEM] Capturing automated UAT visual diff thumbnail..."})
-                    async with async_playwright() as p:
-                        browser = await p.chromium.launch(headless=True)
-                        page = await browser.new_page()
-                        await page.goto("http://localhost:3005", wait_until="networkidle", timeout=15000)
-                        # Ensure public dir exists
-                        os.makedirs("public", exist_ok=True)
-                        await page.screenshot(path="public/uat_preview.png")
-                        await browser.close()
-                except Exception as e:
-                    logging.warning(f"Failed to capture UAT thumbnail: {e}")
-
-                # Set State to AWAITING_UAT
-                save_state(iteration, accumulated_context, 'AWAITING_UAT')
-                conn = sqlite3.connect(db_path)
-                cursor = conn.cursor()
-                cursor.execute("UPDATE DevHouseQueue SET status = 'AWAITING_UAT', updated_at = datetime('now') WHERE id = ?", (task_id,))
-                conn.commit()
-                conn.close()
-
-                await devhouse_queue.put({
-                    "type": "preview",
-                    "message": "Live Preview Ready. Awaiting UAT Approval...",
-                    "url": "http://localhost:3005"
-                })
-
-                # Halt orchestration loop until human approves
-                uat_approval_event.clear()
-                await uat_approval_event.wait()
-
-                # Update status back to running after human responds
-                save_state(iteration, accumulated_context, 'running')
-                conn = sqlite3.connect(db_path)
-                cursor = conn.cursor()
-                cursor.execute("UPDATE DevHouseQueue SET status = 'running', updated_at = datetime('now') WHERE id = ?", (task_id,))
-                conn.commit()
-                conn.close()
-
-                if not uat_decision.get("approved", False):
-                     await devhouse_queue.put({"type": "error", "message": "[UAT] Human rejected changes. Resetting to Jules."})
-                     user_feedback = uat_decision.get("feedback", "")
-                     jules_instruction = f"[UAT ALERT] The human product manager REJECTED your latest changes in the UI preview. Fix the visual layout or feature based on the original request.\n\nSpecific Human Feedback:\n{user_feedback}"
-                     continue
-
-                await devhouse_queue.put({"type": "success", "message": "[UAT] Human approved changes. Proceeding to final Code Review."})
-            finally:
-                if preview_process:
-                     try:
-                         preview_process.kill()
-                         await preview_process.communicate()
-                     except Exception:
-                         pass
-
-            # Step D: Gemini Code Review
-            await update_agent_state("PM_REVIEW")
-            await devhouse_queue.put({"type": "action", "message": f"[PM] Reviewing Diff: Analyzing code changes..."})
-
-            review_text, review_tokens, review_usage = pm_agent.review_diff(latest_diff, accumulated_context)
-            pm_tokens_burned += review_tokens
-            log_telemetry(task_id, "PM", review_usage)
-
-            accumulated_context += f"\n\nReview (Iter {iteration}):\n{review_text}"
-
-            if "LGTM" in review_text.strip():
-                await devhouse_queue.put({"type": "review", "message": f"[PM] Review complete: LGTM. Proceeding to merge."})
-                break
-
-            await devhouse_queue.put({"type": "review", "message": f"[PM] Reviewing Diff: Found issues. Sending feedback back:\n{review_text}"})
-
-            # Step E: Feed feedback back to Jules
-            jules_instruction = f"Code Review Feedback:\n{review_text}\n\nPlease fix these issues."
-
-            iteration += 1
-
-        # End of Loop - Auto-Merge
-        await update_agent_state("DEPLOYED")
-        await devhouse_queue.put({"type": "action", "message": f"[GIT] DevHouse loop finished. Merging branch '{branch_name}' and cleaning up."})
-        save_state(max_iterations, accumulated_context, 'merging')
-        merge_and_delete_branch(branch_name, "main", target_repo)
-        save_state(max_iterations, accumulated_context, 'finished')
-
-        # V40 + V41 Deploy Webhook Logic
-        deploy_webhook_url = os.environ.get("DEPLOY_WEBHOOK_URL")
-        if deploy_webhook_url:
-            try:
-                deploy_secret = os.environ.get("DEPLOY_SECRET", "")
-                headers = {"Authorization": f"Bearer {deploy_secret}"} if deploy_secret else {}
-                import httpx
-                async with httpx.AsyncClient() as client:
-                    await client.post(deploy_webhook_url, headers=headers)
-                await devhouse_queue.put({"type": "info", "message": f"[CD] 🚀 Code merged to main. Deployment webhook triggered!"})
-            except Exception as e:
-                logging.error(f"Failed to trigger deploy webhook: {e}")
-
-        await devhouse_queue.put({"type": "info", "message": f"[SYSTEM] Merge complete. DevHouse Autopilot cycle finished."})
-
-    except Exception as e:
-        await update_agent_state("FAILED")
-        save_state(1, str(e), 'failed')
-        await devhouse_queue.put({"type": "error", "message": f"[ERROR] DevHouse Autopilot crashed: {str(e)}"})
-        raise e
-    finally:
-        if jules_bot:
-            await jules_bot.quit()
-
-queue_running = False
-
-async def queue_runner_loop():
-    global queue_running
-    if queue_running:
-        return
-    queue_running = True
-
-    import sqlite3
-    import os
-    import httpx
-    db_path = os.path.join(os.path.dirname(__file__), 'dev.db')
-
-    while True:
-        try:
-            conn = sqlite3.connect(db_path)
-            cursor = conn.cursor()
-
-            # Fetch pending tasks, or tasks that were running but the server crashed (not completed/failed)
-            cursor.execute("SELECT id, prompt, target_repo, kb_links, model, webhook_url FROM DevHouseQueue WHERE status IN ('pending', 'running') AND agent_state NOT IN ('DEPLOYED', 'FAILED') ORDER BY created_at ASC LIMIT 1")
-            row = cursor.fetchone()
-            if not row:
-                # No pending tasks, check if we need to send morning report
-                cursor.execute("SELECT COUNT(*) FROM DevHouseQueue WHERE status = 'completed'")
-                completed_count = cursor.fetchone()[0]
-                cursor.execute("SELECT COUNT(*) FROM DevHouseQueue WHERE status = 'failed'")
-                failed_count = cursor.fetchone()[0]
-
-                # Check for webhook
-                cursor.execute("SELECT webhook_url FROM DevHouseQueue WHERE webhook_url IS NOT NULL AND webhook_url != '' LIMIT 1")
-                webhook_row = cursor.fetchone()
-
-                if webhook_row and (completed_count > 0 or failed_count > 0):
-                    webhook_url = webhook_row[0]
-                    try:
-                         # Fetch details for the report
-                         cursor.execute("SELECT id, prompt, status FROM DevHouseQueue")
-                         details = [{"id": r[0], "prompt": r[1], "status": r[2]} for r in cursor.fetchall()]
-
-                         payload = {
-                             "total_completed": completed_count,
-                             "total_failed": failed_count,
-                             "details": details
-                         }
-
-                         async with httpx.AsyncClient(timeout=10.0) as client:
-                              await client.post(webhook_url, json=payload)
-
-                         # To avoid spamming on next idle loop, clear the webhook URL from completed/failed tasks
-                         cursor.execute("UPDATE DevHouseQueue SET webhook_url = NULL")
-                         conn.commit()
-                    except Exception as e:
-                         logging.error(f"Failed to send Morning Report webhook: {e}")
-
-                conn.close()
-                queue_running = False
-                break
-
-
-            task_id, prompt_data, target_repo, kb_links, model, webhook_url = row
-            try:
-                import json
-                parsed_prompt = json.loads(prompt_data)
-                if isinstance(parsed_prompt, dict):
-                    actual_prompt = parsed_prompt.get('prompt', '')
-                    attachments = parsed_prompt.get('attachments', [])
-                else:
-                    actual_prompt = prompt_data
-                    attachments = []
-            except Exception:
-                actual_prompt = prompt_data
-                attachments = []
-
-            cursor.execute("UPDATE DevHouseQueue SET status = 'running', updated_at = datetime('now') WHERE id = ?", (task_id,))
-            conn.commit()
-            conn.close()
-
-            async with devhouse_lock:
-                 # Clear old queue messages before starting a new task
-                 while not devhouse_queue.empty():
-                      try:
-                          devhouse_queue.get_nowait()
-                      except asyncio.QueueEmpty:
-                          break
-                 await devhouse_queue.put({"type": "info", "message": f"[QUEUE] Starting task {task_id}..."})
-
-                 success = False
-                 try:
-                      await run_devhouse_autopilot(task_id, actual_prompt, attachments, target_repo, kb_links, model)
-                      success = True
-                 except Exception as e:
-                      logging.error(f"Task {task_id} failed: {e}")
-
-                 conn = sqlite3.connect(db_path)
-                 cursor = conn.cursor()
-                 new_status = 'completed' if success else 'failed'
-                 cursor.execute("UPDATE DevHouseQueue SET status = ?, updated_at = datetime('now') WHERE id = ?", (new_status, task_id))
-                 conn.commit()
-                 conn.close()
-
-        except Exception as e:
-            logging.error(f"Queue runner error: {e}")
-            await asyncio.sleep(5)
-
+from services.state import devhouse_lock, devhouse_queue, uat_approval_event, uat_decision
+from services.db_service import DevHouseDB
+from services.queue_runner import queue_runner_loop, run_devhouse_autopilot
 @app.post("/api/devhouse/sentry")
 async def api_devhouse_sentry(request: Request, background_tasks: BackgroundTasks):
     """
@@ -1383,24 +576,13 @@ async def api_devhouse_sentry(request: Request, background_tasks: BackgroundTask
         if not target_repo or not error_stack:
             return JSONResponse({"status": "error", "message": "repo and error_stack are required"}, status_code=400)
 
-        import sqlite3
-        import os
         import uuid
-        db_path = os.path.join(os.path.dirname(__file__), 'dev.db')
         task_id = f"hotfix-{uuid.uuid4().hex[:8]}"
 
         prompt = f"[URGENT HOTFIX] Production crash detected. Fix this stack trace immediately:\n\n{error_stack}"
 
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
-
         # We forge the created_at to be heavily in the past so it jumps to the front of the queue
-        cursor.execute("""
-            INSERT INTO DevHouseQueue (id, prompt, target_repo, model, status, created_at, updated_at)
-            VALUES (?, ?, ?, ?, 'pending', '1970-01-01 00:00:00', datetime('now'))
-        """, (task_id, prompt, target_repo, "Pro"))
-        conn.commit()
-        conn.close()
+        DevHouseDB.insert_task(task_id, prompt, target_repo, "", "Pro", "", status='pending', created_at='1970-01-01 00:00:00')
 
         background_tasks.add_task(queue_runner_loop)
         return {"status": "success", "message": "P0 Hotfix injected successfully.", "task_id": task_id}
@@ -1422,21 +604,11 @@ async def api_devhouse_queue(request: Request, background_tasks: BackgroundTasks
     if not target_repo:
         return JSONResponse({"status": "error", "message": "target_repo is required"}, status_code=400)
 
-    import sqlite3
-    import os
     import uuid
-    db_path = os.path.join(os.path.dirname(__file__), 'dev.db')
     task_id = str(uuid.uuid4())
 
     try:
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO DevHouseQueue (id, prompt, target_repo, kb_links, model, webhook_url, status)
-            VALUES (?, ?, ?, ?, ?, ?, 'pending')
-        """, (task_id, prompt, target_repo, kb_links, model, webhook_url))
-        conn.commit()
-        conn.close()
+        DevHouseDB.insert_task(task_id, prompt, target_repo, kb_links, model, webhook_url)
 
         background_tasks.add_task(queue_runner_loop)
         return {"status": "success", "message": "Task added to queue.", "task_id": task_id}
@@ -1445,16 +617,8 @@ async def api_devhouse_queue(request: Request, background_tasks: BackgroundTasks
 
 @app.get("/api/devhouse/queue")
 async def get_devhouse_queue():
-    import sqlite3
-    import os
-    db_path = os.path.join(os.path.dirname(__file__), 'dev.db')
     try:
-        conn = sqlite3.connect(db_path)
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM DevHouseQueue ORDER BY created_at DESC")
-        rows = [dict(row) for row in cursor.fetchall()]
-        conn.close()
+        rows = DevHouseDB.get_queue_rows()
         return {"status": "success", "queue": rows}
     except Exception as e:
         return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
@@ -1498,11 +662,16 @@ async def run_workflow_engine(steps, workspace_id, stream_queue=None, profile_id
             step = steps[index]
             step_profile_id = step.get('profileId', profile_id)
 
-            # Re-initialize bot if profile changes or not yet initialized
-            if not current_bot or getattr(current_bot, 'profile_path', None) != (f"chrome_profile_{step_profile_id}" if step_profile_id != "1" else "chrome_profile"):
-                if page: await page.close()
-                current_bot = await get_bot(step_profile_id)
-                page = await current_bot.create_new_page()
+            step_type = step.get('type', 'standard')
+
+            # We only initialize Playwright bot for Scraper node or Agentic Loop which explicitly uses Gemini UI
+            needs_playwright = step_type in ['scraper', 'agentic_loop']
+            if needs_playwright:
+                if not current_bot or getattr(current_bot, 'profile_path', None) != (f"chrome_profile_{step_profile_id}" if step_profile_id != "1" else "chrome_profile"):
+                    if page: await page.close()
+                    current_bot = await get_bot(step_profile_id)
+                    page = await current_bot.create_new_page()
+
             if cancel_event and cancel_event.is_set():
                 if stream_queue: yield f"data: {json.dumps({'step': index + 1, 'status': 'Canceled', 'message': 'Workflow stopped by user.'})}\n\n"
                 break
@@ -2104,215 +1273,81 @@ sys.stdout.write(str(output))
                 if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Complete', 'result': final_result_text, 'show_result': show_result})}\n\n"
                 continue
             else:
-                    # Standard or Aggregator Step
-                    MAX_RETRIES = 3
-                    step_success = False
+                # Standard API Node
+                MAX_RETRIES = 3
+                step_success = False
 
-                    for attempt in range(MAX_RETRIES):
-                        try:
-                            if chat_url and chat_url.startswith('https://gemini.google.com/'):
-                                if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Navigating', 'message': 'Navigating to specific chat URL...'})}\n\n"
-                                await current_bot.goto_specific_chat(page, chat_url)
-                            elif new_chat:
-                                if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'New Chat', 'message': 'Starting new chat...'})}\n\n"
-                                await current_bot.start_new_chat(page)
+                gemini_api_key = os.environ.get("GEMINI_API_KEY")
+                if not gemini_api_key:
+                    if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Error', 'message': 'GEMINI_API_KEY is not set in environment.'})}\n\n"
+                    break
 
-                            # Smart Context Injection: Replace {{OUTPUT_X}} and {{NODE_ID}} with actual results
-                            final_prompt = prompt_template
-                            if system_prompt:
-                                final_prompt = f"System Instructions / Persona:\n{system_prompt}\n\nUser Request:\n{final_prompt}"
+                for attempt in range(MAX_RETRIES):
+                    try:
+                        # Smart Context Injection: Replace {{OUTPUT_X}} and {{NODE_ID}} with actual results
+                        final_prompt = prompt_template
+                        if system_prompt:
+                            final_prompt = f"System Instructions / Persona:\n{system_prompt}\n\nUser Request:\n{final_prompt}"
 
-                            for past_id, past_output in results.items():
-                                tag = f"{{{{OUTPUT_{past_id}}}}}"
-                                if tag in final_prompt:
-                                    final_prompt = final_prompt.replace(tag, past_output)
+                        for past_id, past_output in results.items():
+                            tag = f"{{{{OUTPUT_{past_id}}}}}"
+                            if tag in final_prompt:
+                                final_prompt = final_prompt.replace(tag, past_output)
 
-                                node_tag = f"{{{{{past_id}}}}}"
-                                if node_tag in final_prompt:
-                                    final_prompt = final_prompt.replace(node_tag, str(past_output))
+                            node_tag = f"{{{{{past_id}}}}}"
+                            if node_tag in final_prompt:
+                                final_prompt = final_prompt.replace(node_tag, str(past_output))
 
-                            if len(final_prompt) > CHUNK_LIMIT:
-                                is_chunked = True
-                                # Split by words or just naive length to keep it simple, but chunk roughly cleanly
-                                # A simple chunking by character limit
-                                chunks = [final_prompt[i:i + CHUNK_LIMIT] for i in range(0, len(final_prompt), CHUNK_LIMIT)]
-                                if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Chunking', 'message': f'Input exceeds 10k chars. Auto-split into {len(chunks)} chunks for parallel processing...'})}\n\n"
-                                break # Break the retry loop and handle below via chunk logic
-                            else:
-                                if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Sending', 'message': 'Sending prompt to Gemini...'})}\n\n"
-                                # Send the final compiled prompt to the bot
-                                attachments = step.get('attachments', [])
-                                model_type = step.get('model', 'Auto')
-                                await current_bot.send_prompt(page, final_prompt, attachments=attachments, model=model_type)
+                        if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Sending', 'message': 'Sending prompt to Gemini API...'})}\n\n"
 
+                        genai.configure(api_key=gemini_api_key)
+                        model_type = step.get('model', 'Pro')
+                        model_name = 'gemini-1.5-pro' if model_type == 'Pro' else 'gemini-1.5-flash'
+                        model = genai.GenerativeModel(model_name)
+
+                        # Generate content streaming
+                        response_text = ""
+                        response_stream = await model.generate_content_async(final_prompt, stream=True)
+
+                        async for chunk in response_stream:
                             if cancel_event and cancel_event.is_set():
                                 raise asyncio.CancelledError("Workflow stopped by user.")
+                            if chunk.text:
+                                response_text += chunk.text
+                                if stream_queue:
+                                    # Simulate stream queue updates
+                                    yield f"data: {json.dumps({'step': step_id, 'status': 'Typing', 'partial_result': response_text, 'show_result': show_result})}\n\n"
 
-                            # Wait for the generation to finish
-                            if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Waiting', 'message': 'Waiting for Gemini response...'})}\n\n"
+                        results[str(step_id)] = response_text
 
-                            # Define a callback to put partial results into the queue
-                            async def poll_callback(partial_text):
-                                if cancel_event and cancel_event.is_set():
-                                    raise asyncio.CancelledError("Workflow stopped by user.")
-                                if stream_queue: await stream_queue.put(partial_text)
-
-                            # Run wait_for_response in a background task so we can stream from the queue
-                            wait_task = asyncio.create_task(current_bot.wait_for_response(page, poll_callback=poll_callback if stream_queue else None))
-
-                            while not wait_task.done():
-                                try:
-                                    if stream_queue:
-                                        # Poll the queue for partial updates
-                                        partial_text = await asyncio.wait_for(stream_queue.get(), timeout=0.5)
-                                        yield f"data: {json.dumps({'step': step_id, 'status': 'Typing', 'partial_result': partial_text, 'show_result': show_result})}\n\n"
-                                    else:
-                                        await asyncio.wait_for(asyncio.sleep(0.5), timeout=0.5)
-                                except asyncio.TimeoutError:
-                                    # Yield heartbeats or check cancel event
-                                    if cancel_event and cancel_event.is_set():
-                                        wait_task.cancel()
-                                        raise asyncio.CancelledError("Workflow stopped by user.")
-                                    continue
-
-                            # Check if wait_task raised an exception
-                            wait_task.result()
-
-                            if cancel_event and cancel_event.is_set():
-                                raise asyncio.CancelledError("Workflow stopped by user.")
-
-                            # Extract the output
-                            if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Extracting', 'message': 'Extracting response text...'})}\n\n"
-                            response_text = await current_bot.get_last_response(page)
-
-                            results[str(step_id)] = response_text
-
-                            if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Complete', 'result': response_text, 'show_result': show_result})}\n\n"
-                            logging.info(f"Step {step_id} completed successfully.")
-                            step_success = True
-                            break
-
-                        except asyncio.CancelledError as e:
-                            if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Canceled', 'message': str(e)})}\n\n"
-                            step_success = False
-                            break # Break retry loop immediately on cancel
-                        except Exception as e:
-                            if attempt < MAX_RETRIES - 1:
-                                error_msg = f"Step {step_id} failed, preparing retry {attempt + 1}, error: {str(e)}"
-                                logging.warning(error_msg)
-                                if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Retrying', 'message': f'Response timeout, retrying {attempt + 1}...'})}\n\n"
-
-                                # Break wait loop if canceled during sleep
-                                try:
-                                    await asyncio.wait_for(cancel_event.wait(), timeout=5)
-                                    # If we didn't timeout, event was set
-                                    if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Canceled', 'message': 'Workflow stopped by user.'})}\n\n"
-                                    step_success = False
-                                    break
-                                except asyncio.TimeoutError:
-                                    pass # Continue retrying
-
-                                # Reload the page before retrying to clear stuck state but preserve session/history
-                                await page.reload()
-                            else:
-                                error_msg = f"Error in Step {step_id}: {str(e)}"
-                                logging.error(error_msg)
-                                results[str(step_id)] = f"[FAILED] {error_msg}"
-                                if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Error', 'result': results[str(step_id)]})}\n\n"
-                                # We break the retry loop, then we will break the workflow below
-                                break
-
-                    if is_chunked:
-                        # Process chunks concurrently using the same pattern as batch map-reduce
-                        # Enforce strict concurrent limits for auto-chunking (max 3)
-                        concurrent_semaphore = asyncio.Semaphore(3)
-
-                        async def process_chunk(chunk_text, chunk_index):
-                            chunk_page = None
-                            # Acquire semaphore first, so we don't spam 100 page creations
-                            await concurrent_semaphore.acquire()
-                            try:
-                                if cancel_event and cancel_event.is_set():
-                                    return f"[Chunk {chunk_index + 1} CANCELED]"
-
-                                chunk_page = await current_bot.create_new_page()
-
-                                chunk_retries = 3
-                                for c_attempt in range(chunk_retries):
-                                    try:
-                                        if chat_url and chat_url.startswith('https://gemini.google.com/'):
-                                            if stream_queue: await stream_queue.put(f"__STATUS__:Navigating chunk {chunk_index + 1} to chat URL...")
-                                            await current_bot.goto_specific_chat(chunk_page, chat_url)
-                                        elif new_chat:
-                                            await current_bot.start_new_chat(chunk_page)
-
-                                        # To provide context to the bot, we prepend instructions to chunks
-                                        chunk_wrapper = f"Please process this chunk of a larger document:\n\n{chunk_text}"
-
-                                        await current_bot.send_prompt(chunk_page, chunk_wrapper, attachments=step.get('attachments', []), model=step.get('model', 'Auto'))
-
-                                        if cancel_event and cancel_event.is_set():
-                                            return f"[Chunk {chunk_index + 1} CANCELED]"
-
-                                        async def chunk_poll(partial_text):
-                                            if cancel_event and cancel_event.is_set():
-                                                raise asyncio.CancelledError("Canceled")
-                                            if stream_queue: await stream_queue.put(partial_text)
-
-                                        wait_task = asyncio.create_task(current_bot.wait_for_response(chunk_page, poll_callback=chunk_poll if stream_queue else None))
-
-                                        while not wait_task.done():
-                                            try:
-                                                await asyncio.wait_for(asyncio.sleep(0.5), timeout=0.5)
-                                            except asyncio.TimeoutError:
-                                                if cancel_event and cancel_event.is_set():
-                                                    wait_task.cancel()
-                                                    return f"[Chunk {chunk_index + 1} CANCELED]"
-                                                continue
-
-                                        wait_task.result()
-                                        if cancel_event and cancel_event.is_set():
-                                            return f"[Chunk {chunk_index + 1} CANCELED]"
-
-                                        return await current_bot.get_last_response(chunk_page)
-
-                                    except asyncio.CancelledError:
-                                        return f"[Chunk {chunk_index + 1} CANCELED]"
-                                    except Exception as ce:
-                                        if c_attempt < chunk_retries - 1:
-                                            if cancel_event and cancel_event.is_set():
-                                                return f"[Chunk {chunk_index + 1} CANCELED]"
-                                            await chunk_page.reload()
-                                        else:
-                                            return f"[FAILED Chunk {chunk_index + 1}] {str(ce)}"
-                            finally:
-                                if chunk_page:
-                                    await chunk_page.close()
-                                concurrent_semaphore.release()
-
-                        chunk_tasks = [process_chunk(ch, i) for i, ch in enumerate(chunks)]
-
-                        pump_task = None
-                        if stream_queue:
-                            async def pump_queue():
-                                while True:
-                                    try:
-                                        partial_text = await asyncio.wait_for(stream_queue.get(), timeout=0.5)
-                                    except asyncio.TimeoutError:
-                                        pass
-                                    except Exception:
-                                        break
-                            pump_task = asyncio.create_task(pump_queue())
-
-                        try:
-                            chunk_results = await asyncio.gather(*chunk_tasks)
-                        finally:
-                            if pump_task: pump_task.cancel()
-
-                        final_result_text = "\n\n--- [Auto-Chunk Break] ---\n\n".join(chunk_results)
-                        results[str(step_id)] = final_result_text
-                        if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Complete', 'result': final_result_text, 'show_result': show_result})}\n\n"
+                        if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Complete', 'result': response_text, 'show_result': show_result})}\n\n"
+                        logging.info(f"Step {step_id} completed successfully via API.")
                         step_success = True
+                        break
+
+                    except asyncio.CancelledError as e:
+                        if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Canceled', 'message': str(e)})}\n\n"
+                        step_success = False
+                        break
+                    except Exception as e:
+                        if attempt < MAX_RETRIES - 1:
+                            error_msg = f"Step {step_id} failed, preparing retry {attempt + 1}, error: {str(e)}"
+                            logging.warning(error_msg)
+                            if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Retrying', 'message': f'Response timeout/error, retrying {attempt + 1}...'})}\n\n"
+
+                            try:
+                                await asyncio.wait_for(cancel_event.wait(), timeout=5)
+                                if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Canceled', 'message': 'Workflow stopped by user.'})}\n\n"
+                                step_success = False
+                                break
+                            except asyncio.TimeoutError:
+                                pass
+                        else:
+                            error_msg = f"Error in Step {step_id}: {str(e)}"
+                            logging.error(error_msg)
+                            results[str(step_id)] = f"[FAILED] {error_msg}"
+                            if stream_queue: yield f"data: {json.dumps({'step': step_id, 'status': 'Error', 'result': results[str(step_id)]})}\n\n"
+                            break
 
             if not step_success:
                 # If a critical error occurs and all retries fail, break the workflow to avoid cascaded failures
@@ -2376,25 +1411,16 @@ async def resume_workflow(request: Request):
         action = data.get('action') # 'approve' or 'reject'
         edited_text = data.get('text', '')
 
-        import sqlite3, os
-        db_path = os.path.join(os.path.dirname(__file__), 'dev.db')
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
-
-        cursor.execute("SELECT logs, userId, workflowId FROM RunHistory WHERE id = ?", (run_id,))
-        row = cursor.fetchone()
+        row = DevHouseDB.get_run_history(run_id)
 
         if not row:
-            conn.close()
             return JSONResponse({"error": "Run not found"}, status_code=404)
 
         state_str, user_id, workspace_id = row
         state = json.loads(state_str)
 
         if action == 'reject':
-            cursor.execute("UPDATE RunHistory SET status = 'Canceled' WHERE id = ?", (run_id,))
-            conn.commit()
-            conn.close()
+            DevHouseDB.update_run_history_status(run_id, 'Canceled')
             return JSONResponse({"status": "rejected"})
 
         index = state['index']
@@ -2408,21 +1434,19 @@ async def resume_workflow(request: Request):
         task_streams[task_id] = asyncio.Queue()
 
         # Dispatch background task resuming from index
-        asyncio.create_task(task_worker(
-            task_id,
+        asyncio.create_task(run_workflow_engine(
             steps,
             workspace_id,
-            "1", # profile_id
-            state['run_variables'],
-            state['global_state'],
-            user_id,
+            stream_queue=task_streams[task_id],
+            profile_id="1",
+            run_variables=state['run_variables'],
+            global_state=state['global_state'],
+            user_id=user_id,
             start_index=index,
             initial_results=results
         ))
 
-        cursor.execute("UPDATE RunHistory SET status = 'Resumed' WHERE id = ?", (run_id,))
-        conn.commit()
-        conn.close()
+        DevHouseDB.update_run_history_status(run_id, 'Resumed')
 
         return {"task_id": task_id, "status": "resumed"}
 
@@ -2469,31 +1493,12 @@ async def execute_workflow(request: Request):
 
     # --- SAAS QUOTA CHECK ---
     if user_id:
-        import sqlite3
-        import os
         try:
-            db_path = os.path.join(os.path.dirname(__file__), 'dev.db')
-            conn = sqlite3.connect(db_path)
-            cursor = conn.cursor()
-
-            # Auto-create user for seamless mock-auth experience
-            cursor.execute("INSERT OR IGNORE INTO User (id, email, tokens_balance, createdAt, updatedAt) VALUES (?, ?, 5, datetime('now'), datetime('now'))", (user_id, f"{user_id}@example.com"))
-            conn.commit()
-
-            cursor.execute("SELECT tokens_balance FROM User WHERE id = ?", (user_id,))
-            row = cursor.fetchone()
-            if row:
-                quota = row[0]
-                if quota <= 0:
-                    conn.close()
-                    return JSONResponse({"error": "[SYSTEM_ERROR] 免费额度已耗尽 (Quota Exceeded). 请充值获取更多额度。"}, status_code=403)
-                else:
-                    cursor.execute("UPDATE User SET tokens_balance = tokens_balance - 1 WHERE id = ?", (user_id,))
-                    conn.commit()
-            else:
-                conn.close()
+            quota_status = DevHouseDB.check_and_deduct_quota(user_id)
+            if quota_status == "exceeded":
+                return JSONResponse({"error": "[SYSTEM_ERROR] 免费额度已耗尽 (Quota Exceeded). 请充值获取更多额度。"}, status_code=403)
+            elif quota_status == "not_found":
                 return JSONResponse({"error": "[SYSTEM_ERROR] User not found."}, status_code=403)
-            conn.close()
         except Exception as e:
             logging.error(f"Quota check failed: {e}")
             return JSONResponse({"error": "[SYSTEM_ERROR] 余额校验失败 (Quota validation failed). 请稍后再试。"}, status_code=500)
