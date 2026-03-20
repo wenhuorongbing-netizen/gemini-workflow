@@ -11,4 +11,4 @@ apscheduler==3.10.4
 google-generativeai
 PyGithub
 python-dotenv
-rank_bm25==0.2.2
+chromadb
