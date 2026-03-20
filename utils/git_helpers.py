@@ -94,16 +94,44 @@ def scan_repo_structure(sandbox_path):
 
     return "\n".join(file_tree)
 
+import time
+import chromadb
+import google.generativeai as genai
+
+def _get_embedding_with_retry(text, task_type="retrieval_document", model="models/text-embedding-004", max_retries=3):
+    for attempt in range(max_retries):
+        try:
+            result = genai.embed_content(
+                model=model,
+                content=text,
+                task_type=task_type
+            )
+            return result['embedding']
+        except Exception as e:
+            if attempt < max_retries - 1:
+                time.sleep(2 ** attempt)  # Exponential backoff
+            else:
+                raise e
+
+def _chunk_text(text, chunk_size=1000, overlap=100):
+    chunks = []
+    start = 0
+    while start < len(text):
+        chunks.append(text[start:start+chunk_size])
+        start += chunk_size - overlap
+    return chunks
+
 def index_repository(repo_path, prompt):
     import os
-    from rank_bm25 import BM25Okapi
-
-    docs = []
-    file_paths = []
+    import uuid
 
     valid_extensions = {'.py', '.ts', '.tsx', '.js'}
     ignored_dirs = {'node_modules', '.git', '__pycache__', '.next', 'build', 'dist', 'out'}
 
+    docs = []
+    file_paths = []
+
+    # 1. Chunking
     for root, dirs, files in os.walk(repo_path):
         dirs[:] = [d for d in dirs if d not in ignored_dirs and not d.startswith('.')]
         for file in files:
@@ -113,27 +141,64 @@ def index_repository(repo_path, prompt):
                 try:
                     with open(filepath, 'r', encoding='utf-8') as f:
                         content = f.read()
-                        # Simple chunking by file for now
-                        docs.append(content)
-                        file_paths.append(filepath.replace(repo_path, '').lstrip('/'))
+                        rel_path = filepath.replace(repo_path, '').lstrip('/')
+                        chunks = _chunk_text(content)
+                        for chunk in chunks:
+                            docs.append(chunk)
+                            file_paths.append(rel_path)
                 except Exception:
                     pass
 
     if not docs:
         return "No relevant source files found."
 
-    tokenized_docs = [doc.split(" ") for doc in docs]
-    bm25 = BM25Okapi(tokenized_docs)
+    # 2. ChromaDB Initialization
+    chroma_client = chromadb.PersistentClient(path="./chroma_db")
+    # Use a dynamic collection name based on repo_path hash or just recreate
+    collection_name = "codebase_index"
+    try:
+        chroma_client.delete_collection(name=collection_name)
+    except Exception:
+        pass
+    collection = chroma_client.create_collection(name=collection_name)
 
-    tokenized_query = prompt.split(" ")
+    # 3. Embedding generation and insertion
+    # Ensure Gemini API key is configured
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if api_key:
+        genai.configure(api_key=api_key)
 
-    top_n = min(5, len(docs))
-    top_docs = bm25.get_top_n(tokenized_query, docs, n=top_n)
+    embeddings = []
+    ids = []
+    metadatas = []
+
+    for i, doc in enumerate(docs):
+        # Retrieve embeddings one by one with backoff
+        emb = _get_embedding_with_retry(doc)
+        embeddings.append(emb)
+        ids.append(str(uuid.uuid4()))
+        metadatas.append({"filepath": file_paths[i]})
+
+    collection.add(
+        embeddings=embeddings,
+        documents=docs,
+        metadatas=metadatas,
+        ids=ids
+    )
+
+    # 4. Retrieval
+    query_emb = _get_embedding_with_retry(prompt, task_type="retrieval_query")
+    top_k = min(5, len(docs))
+
+    results = collection.query(
+        query_embeddings=[query_emb],
+        n_results=top_k
+    )
 
     radar_report = "--- RADAR REPORT: TOP RELEVANT FILES ---\n\n"
-    for i, doc in enumerate(top_docs):
-        # find original filepath
-        idx = docs.index(doc)
-        radar_report += f"File: {file_paths[idx]}\nSnippet (first 500 chars):\n{doc[:500]}...\n\n"
+    if results['documents'] and results['documents'][0]:
+        for idx, doc in enumerate(results['documents'][0]):
+            filepath = results['metadatas'][0][idx]['filepath']
+            radar_report += f"File: {filepath}\nSnippet:\n{doc}...\n\n"
 
     return radar_report
