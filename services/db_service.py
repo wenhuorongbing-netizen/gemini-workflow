@@ -71,6 +71,161 @@ class DevHouseDB:
                 updatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         """)
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS Workspaces (
+                id TEXT PRIMARY KEY,
+                name TEXT,
+                steps TEXT,
+                results TEXT,
+                watch_folder TEXT,
+                webhook_url TEXT,
+                cron_schedule TEXT
+            )
+        ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS Globals (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            )
+        ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS Templates (
+                id TEXT PRIMARY KEY,
+                name TEXT,
+                description TEXT,
+                steps TEXT
+            )
+        ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS AppRunHistory (
+                workspace_id TEXT PRIMARY KEY,
+                history_data TEXT
+            )
+        ''')
+        conn.commit()
+        conn.close()
+
+    @staticmethod
+    def get_all_workspaces():
+        conn = DevHouseDB._get_conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, name, steps, results, watch_folder, webhook_url, cron_schedule FROM Workspaces")
+        workspaces = {}
+        for row in cursor.fetchall():
+            workspaces[row[0]] = {
+                "name": row[1],
+                "steps": json.loads(row[2]) if row[2] else [],
+                "results": json.loads(row[3]) if row[3] else {}
+            }
+            if row[4]: workspaces[row[0]]["watch_folder"] = row[4]
+            if row[5]: workspaces[row[0]]["webhook_url"] = row[5]
+            if row[6]: workspaces[row[0]]["cron_schedule"] = row[6]
+        conn.close()
+        return workspaces
+
+    @staticmethod
+    def get_workspace(workspace_id):
+        conn = DevHouseDB._get_conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT name, steps, results, watch_folder, webhook_url, cron_schedule FROM Workspaces WHERE id = ?", (workspace_id,))
+        row = cursor.fetchone()
+        conn.close()
+        if not row:
+            return None
+        workspace = {
+            "name": row[0],
+            "steps": json.loads(row[1]) if row[1] else [],
+            "results": json.loads(row[2]) if row[2] else {}
+        }
+        if row[3]: workspace["watch_folder"] = row[3]
+        if row[4]: workspace["webhook_url"] = row[4]
+        if row[5]: workspace["cron_schedule"] = row[5]
+        return workspace
+
+    @staticmethod
+    def save_workspace(workspace_id, name, steps, results, watch_folder, webhook_url, cron_schedule):
+        conn = DevHouseDB._get_conn()
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT OR REPLACE INTO Workspaces (id, name, steps, results, watch_folder, webhook_url, cron_schedule)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', (workspace_id, name, json.dumps(steps) if steps else "[]", json.dumps(results) if results else "{}", watch_folder, webhook_url, cron_schedule))
+        conn.commit()
+        conn.close()
+
+    @staticmethod
+    def delete_workspace(workspace_id):
+        conn = DevHouseDB._get_conn()
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM Workspaces WHERE id = ?", (workspace_id,))
+        conn.commit()
+        conn.close()
+
+    @staticmethod
+    def get_all_globals():
+        conn = DevHouseDB._get_conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT key, value FROM Globals")
+        globals_dict = {row[0]: row[1] for row in cursor.fetchall()}
+        conn.close()
+        return globals_dict
+
+    @staticmethod
+    def save_globals(data_dict):
+        conn = DevHouseDB._get_conn()
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM Globals")
+        for k, v in data_dict.items():
+            cursor.execute("INSERT INTO Globals (key, value) VALUES (?, ?)", (k, v))
+        conn.commit()
+        conn.close()
+
+    @staticmethod
+    def get_all_templates():
+        conn = DevHouseDB._get_conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, name, description, steps FROM Templates")
+        templates = {}
+        for row in cursor.fetchall():
+            templates[row[0]] = {
+                "name": row[1],
+                "description": row[2],
+                "steps": json.loads(row[3]) if row[3] else []
+            }
+        conn.close()
+        return templates
+
+    @staticmethod
+    def save_template(template_id, name, description, steps):
+        conn = DevHouseDB._get_conn()
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT OR REPLACE INTO Templates (id, name, description, steps)
+            VALUES (?, ?, ?, ?)
+        ''', (template_id, name, description, json.dumps(steps) if steps else "[]"))
+        conn.commit()
+        conn.close()
+
+    @staticmethod
+    def get_workspace_history(workspace_id):
+        conn = DevHouseDB._get_conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT history_data FROM AppRunHistory WHERE workspace_id = ?", (workspace_id,))
+        row = cursor.fetchone()
+        conn.close()
+        if not row:
+            return []
+        return json.loads(row[0]) if row[0] else []
+
+    @staticmethod
+    def save_workspace_history(workspace_id, history_list):
+        conn = DevHouseDB._get_conn()
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT OR REPLACE INTO AppRunHistory (workspace_id, history_data)
+            VALUES (?, ?)
+        ''', (workspace_id, json.dumps(history_list)))
         conn.commit()
         conn.close()
 

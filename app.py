@@ -130,81 +130,36 @@ scheduler = AsyncIOScheduler()
 
 import datetime
 
-EPICS_FILE = 'epics.json'
-GLOBALS_FILE = 'globals.json'
-TEMPLATES_FILE = 'templates.json'
-HISTORY_FILE = 'history.json'
 HEADLESS_MODE = True
-
-def load_history():
-    if os.path.exists(HISTORY_FILE):
-        try:
-            with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except:
-            return {}
-    return {}
-
-def save_history(data):
-    with open(HISTORY_FILE, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
 
 @app.get("/api/workspaces/{workspace_id}/history")
 async def get_workspace_history(workspace_id: str):
-    history_db = load_history()
-    ws_history = history_db.get(workspace_id, [])
+    ws_history = DevHouseDB.get_workspace_history(workspace_id)
     return JSONResponse(ws_history)
-
-def load_templates():
-    if os.path.exists(TEMPLATES_FILE):
-        try:
-            with open(TEMPLATES_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except:
-            return {}
-    return {}
-
-def save_templates(data):
-    with open(TEMPLATES_FILE, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
 
 @app.get("/api/templates")
 async def get_templates():
-    return JSONResponse(load_templates())
+    return JSONResponse(DevHouseDB.get_all_templates())
 
 @app.post("/api/templates/{template_id}")
 async def save_template_endpoint(template_id: str, request: Request):
     data = await request.json()
-    templates_db = load_templates()
-    templates_db[template_id] = {
-        "name": data.get("name", "New Template"),
-        "description": data.get("description", ""),
-        "steps": data.get("steps", [])
-    }
-    save_templates(templates_db)
+    DevHouseDB.save_template(
+        template_id,
+        data.get("name", "New Template"),
+        data.get("description", ""),
+        data.get("steps", [])
+    )
     return JSONResponse({"status": "success"})
-
-def load_globals():
-    if os.path.exists(GLOBALS_FILE):
-        try:
-            with open(GLOBALS_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except:
-            return {}
-    return {}
-
-def save_globals(data):
-    with open(GLOBALS_FILE, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
 
 @app.get("/api/globals")
 async def get_global_vars():
-    return JSONResponse(load_globals())
+    return JSONResponse(DevHouseDB.get_all_globals())
 
 @app.post("/api/globals")
 async def save_global_vars(request: Request):
     data = await request.json()
-    save_globals(data)
+    DevHouseDB.save_globals(data)
     return JSONResponse({"status": "success"})
 
 @app.post("/api/settings/headless")
@@ -225,18 +180,6 @@ async def toggle_headless(request: Request):
 async def get_headless():
     return JSONResponse({"headless": HEADLESS_MODE})
 
-def load_epics():
-    if os.path.exists(EPICS_FILE):
-        try:
-            with open(EPICS_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except:
-            return {}
-    return {}
-
-def save_epics(data):
-    with open(EPICS_FILE, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
 templates = Jinja2Templates(directory="templates")
 logging.basicConfig(
     level=logging.INFO,
@@ -345,7 +288,7 @@ def setup_watchers(loop=None):
     # Also update the scheduler
     scheduler.remove_all_jobs()
 
-    epics = load_epics()
+    epics = DevHouseDB.get_all_workspaces()
 
     for ws_id, data in epics.items():
         steps = data.get('steps', [])
@@ -442,7 +385,7 @@ async def get_logs():
 @app.get("/api/workspaces")
 @app.get("/api/epics")
 async def get_workspaces():
-    epics = load_epics()
+    epics = DevHouseDB.get_all_workspaces()
     # Return minimal info for sidebar
     workspaces = []
     for ws_id, data in epics.items():
@@ -451,42 +394,31 @@ async def get_workspaces():
 
 @app.get("/api/workspaces/{workspace_id}")
 async def get_workspace(workspace_id: str):
-    epics = load_epics()
-    if workspace_id not in epics:
+    workspace = DevHouseDB.get_workspace(workspace_id)
+    if not workspace:
         raise HTTPException(status_code=404, detail="Workspace not found")
-    return JSONResponse(epics[workspace_id])
+    return JSONResponse(workspace)
 
 @app.post("/api/workspaces/{workspace_id}")
 async def save_workspace(workspace_id: str, request: Request):
     data = await request.json()
-    epics = load_epics()
+    existing = DevHouseDB.get_workspace(workspace_id) or {"name": "New Workspace", "steps": [], "results": {}}
 
-    if workspace_id not in epics:
-        epics[workspace_id] = {"name": data.get("name", "New Workspace"), "steps": [], "results": {}}
+    name = data.get("name", existing.get("name"))
+    steps = data.get("steps", existing.get("steps"))
+    results = data.get("results", existing.get("results"))
+    watch_folder = data.get("watch_folder", existing.get("watch_folder"))
+    webhook_url = data.get("webhook_url", existing.get("webhook_url"))
+    cron_schedule = data.get("cron_schedule", existing.get("cron_schedule"))
 
-    if "name" in data:
-        epics[workspace_id]["name"] = data["name"]
-    if "steps" in data:
-        epics[workspace_id]["steps"] = data["steps"]
-    if "results" in data:
-        epics[workspace_id]["results"] = data["results"]
-    if "watch_folder" in data:
-        epics[workspace_id]["watch_folder"] = data["watch_folder"]
-    if "webhook_url" in data:
-        epics[workspace_id]["webhook_url"] = data["webhook_url"]
-    if "cron_schedule" in data:
-        epics[workspace_id]["cron_schedule"] = data["cron_schedule"]
+    DevHouseDB.save_workspace(workspace_id, name, steps, results, watch_folder, webhook_url, cron_schedule)
 
-    save_epics(epics)
     setup_watchers() # Refresh watchers and schedulers on save
     return JSONResponse({"status": "success"})
 
 @app.delete("/api/workspaces/{workspace_id}")
 async def delete_workspace(workspace_id: str):
-    epics = load_epics()
-    if workspace_id in epics:
-        del epics[workspace_id]
-        save_epics(epics)
+    DevHouseDB.delete_workspace(workspace_id)
     return JSONResponse({"status": "deleted"})
 
 @app.get("/api/devhouse/diff")
@@ -693,7 +625,7 @@ async def run_workflow_engine(steps, workspace_id, stream_queue=None, profile_id
                     system_prompt = system_prompt.replace(g_tag, g_val)
 
             # Global variable injection
-            global_vars = load_globals()
+            global_vars = DevHouseDB.get_all_globals()
             for g_key, g_val in global_vars.items():
                 g_tag = f"{{{{GLOBAL_{g_key}}}}}"
                 if g_tag in prompt_template:

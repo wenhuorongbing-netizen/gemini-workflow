@@ -96,10 +96,42 @@ def scan_repo_structure(sandbox_path):
 
 def index_repository(repo_path, prompt):
     import os
-    from rank_bm25 import BM25Okapi
+    import time
+    import chromadb
+    import google.generativeai as genai
+
+    gemini_api_key = os.environ.get("GEMINI_API_KEY")
+    if gemini_api_key:
+        genai.configure(api_key=gemini_api_key)
+
+    def _embed_with_retry(content):
+        # Retry with exponential backoff and sleep (Synchronous to avoid thread/event-loop collisions)
+        for attempt in range(5):
+            try:
+                result = genai.embed_content(
+                    model="models/text-embedding-004",
+                    content=content
+                )
+                return result['embedding']
+            except Exception as e:
+                if attempt == 4:
+                    raise e
+                time.sleep(2 ** attempt)
+
+    client = chromadb.PersistentClient(path="./chroma_db")
+
+    collection_name = "codebase_" + os.path.basename(repo_path.rstrip('/'))
+    try:
+        client.delete_collection(name=collection_name)
+    except Exception:
+        pass
+    collection = client.create_collection(name=collection_name)
 
     docs = []
     file_paths = []
+
+    # Chunking limits
+    CHUNK_SIZE = 1000
 
     valid_extensions = {'.py', '.ts', '.tsx', '.js'}
     ignored_dirs = {'node_modules', '.git', '__pycache__', '.next', 'build', 'dist', 'out'}
@@ -113,27 +145,53 @@ def index_repository(repo_path, prompt):
                 try:
                     with open(filepath, 'r', encoding='utf-8') as f:
                         content = f.read()
-                        # Simple chunking by file for now
-                        docs.append(content)
-                        file_paths.append(filepath.replace(repo_path, '').lstrip('/'))
+
+                        # Chunking
+                        for i in range(0, len(content), CHUNK_SIZE):
+                            chunk = content[i:i+CHUNK_SIZE]
+                            docs.append(chunk)
+                            file_paths.append(filepath.replace(repo_path, '').lstrip('/'))
                 except Exception:
                     pass
 
     if not docs:
         return "No relevant source files found."
 
-    tokenized_docs = [doc.split(" ") for doc in docs]
-    bm25 = BM25Okapi(tokenized_docs)
+    try:
+        embeddings = []
+        for doc in docs:
+            emb = _embed_with_retry(doc)
+            embeddings.append(emb)
 
-    tokenized_query = prompt.split(" ")
+        prompt_embedding = _embed_with_retry(prompt)
+    except Exception as e:
+        return f"--- RADAR REPORT ERROR ---\nCould not generate embeddings: {e}"
 
+    # Upsert into ChromaDB
+    ids = [str(i) for i in range(len(docs))]
+    metadatas = [{"filepath": fp} for fp in file_paths]
+
+    collection.add(
+        documents=docs,
+        embeddings=embeddings,
+        metadatas=metadatas,
+        ids=ids
+    )
+
+    # Query
     top_n = min(5, len(docs))
-    top_docs = bm25.get_top_n(tokenized_query, docs, n=top_n)
+    results = collection.query(
+        query_embeddings=[prompt_embedding],
+        n_results=top_n
+    )
 
     radar_report = "--- RADAR REPORT: TOP RELEVANT FILES ---\n\n"
-    for i, doc in enumerate(top_docs):
-        # find original filepath
-        idx = docs.index(doc)
-        radar_report += f"File: {file_paths[idx]}\nSnippet (first 500 chars):\n{doc[:500]}...\n\n"
+    if results['documents'] and results['documents'][0]:
+        top_docs = results['documents'][0]
+        top_metadatas = results['metadatas'][0]
+
+        for i, doc in enumerate(top_docs):
+            filepath = top_metadatas[i]['filepath']
+            radar_report += f"File: {filepath}\nSnippet (first 500 chars):\n{doc[:500]}...\n\n"
 
     return radar_report
